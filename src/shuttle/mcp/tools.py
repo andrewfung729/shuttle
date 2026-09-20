@@ -1,7 +1,8 @@
 """MCP tool registrations for the Shuttle SSH gateway.
 
-Provides ``register_tools()`` which wires up five tools on a FastMCP instance:
-ssh_run, ssh_list_nodes, ssh_upload, ssh_download, ssh_add_node.
+Provides ``register_tools()`` which wires up four tools on a FastMCP instance:
+ssh_run, ssh_upload, ssh_download, ssh_add_node. (Node listing is exposed
+via the ``shuttle://nodes`` resource, not a tool.)
 
 Sessions are managed implicitly: ``ssh_run`` auto-creates or reuses a session
 per node so that working directory context is preserved across calls.
@@ -283,23 +284,6 @@ def register_tools(
             db_session_ctx=db_session_ctx,
             node_repo_factory=node_repo_factory,
         )
-
-    # -- ssh_list_nodes -------------------------------------------------------
-    @mcp.tool()
-    async def ssh_list_nodes() -> str:
-        """List all configured SSH nodes with status icons."""
-        async with db_session_ctx() as db_sess:
-            repo = node_repo_factory(db_sess)
-            nodes = await repo.list_all()
-
-        if not nodes:
-            return "No nodes configured."
-
-        lines = []
-        for n in nodes:
-            icon = {"active": "●", "inactive": "○", "error": "✗"}.get(n.status, "?")
-            lines.append(f"  {icon} {n.name}  {n.host}:{n.port}  user={n.username}")
-        return "\n".join(lines)
 
     # -- ssh_upload -----------------------------------------------------------
     @mcp.tool()

@@ -7,6 +7,8 @@ DB logging through the real FastMCP protocol layer.
 
 from __future__ import annotations
 
+import json
+import re
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +22,7 @@ from shuttle.core.security import CommandGuard, ConfirmTokenStore
 from shuttle.core.session import SSHSession
 from shuttle.db.models import Base, CommandLog
 from shuttle.db.repository import NodeRepo, RuleRepo
+from shuttle.mcp.resources import register_resources
 from shuttle.mcp.tools import register_tools
 
 # ---------------------------------------------------------------------------
@@ -106,6 +109,13 @@ async def mcp_server(mock_pool, mock_session_mgr, db_factory):
         db_session_ctx=db_session_ctx,
         node_repo_factory=NodeRepo,
     )
+    register_resources(
+        mcp=mcp,
+        pool=mock_pool,
+        session_mgr=mock_session_mgr,
+        db_session_ctx=db_session_ctx,
+        node_repo_factory=NodeRepo,
+    )
     return mcp
 
 
@@ -132,14 +142,13 @@ async def mcp_server_with_session(mcp_server, mock_session_mgr):
 
 @pytest.mark.asyncio
 async def test_client_discovers_all_tools(mcp_server):
-    """FastMCP Client.list_tools() must see all 5 Shuttle tools."""
+    """FastMCP Client.list_tools() must see all 4 Shuttle tools."""
     async with Client(mcp_server) as client:
         tools = await client.list_tools()
 
     tool_names = {t.name for t in tools}
     expected = {
         "ssh_run",
-        "ssh_list_nodes",
         "ssh_upload",
         "ssh_download",
         "ssh_add_node",
@@ -158,19 +167,20 @@ async def test_tool_schemas_have_descriptions(mcp_server):
 
 
 # ---------------------------------------------------------------------------
-# ssh_list_nodes via Client
+# shuttle://nodes resource via Client (replaces deleted ssh_list_nodes tool)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_list_nodes_via_client(mcp_server):
-    """ssh_list_nodes called through Client returns the seeded node."""
+    """shuttle://nodes resource read through Client returns the seeded node."""
     async with Client(mcp_server) as client:
-        result = await client.call_tool("ssh_list_nodes", {})
+        result = await client.read_resource("shuttle://nodes")
 
-    text = _result_text(result)
-    assert "test-node" in text
-    assert "10.0.0.1" in text
+    data = json.loads(result[0].text)
+    assert data["total"] == 1
+    assert data["nodes"][0]["name"] == "test-node"
+    assert data["nodes"][0]["host"] == "10.0.0.1"
 
 
 # ---------------------------------------------------------------------------

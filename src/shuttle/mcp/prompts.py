@@ -22,80 +22,6 @@ def register_prompts(
     """Register all Shuttle MCP prompts on the given FastMCP instance."""
 
     @mcp.prompt()
-    async def shuttle_overview() -> str:
-        """Get a complete overview of the current Shuttle environment.
-
-        Returns live node status, active sessions, security rule summary,
-        and connection pool state — everything an AI assistant needs to
-        start working with this Shuttle instance.
-        """
-        from shuttle.db.repository import RuleRepo
-
-        # Nodes
-        async with db_session_ctx() as db_sess:
-            repo = node_repo_factory(db_sess)
-            nodes = await repo.list_all()
-
-        node_lines = []
-        for n in nodes:
-            icon = {"active": "●", "inactive": "○", "error": "✗"}.get(n.status, "?")
-            node_lines.append(
-                f"  {icon} {n.name} — {n.host}:{n.port} (user={n.username}, "
-                f"auth={n.auth_type}, tags={n.tags or []})"
-            )
-        nodes_section = (
-            "\n".join(node_lines) if node_lines else "  (no nodes configured)"
-        )
-
-        # Sessions
-        active = session_mgr.list_active()
-        session_lines = []
-        for s in active:
-            session_lines.append(
-                f"  • {s.node_id} — cwd={s.working_directory}, "
-                f"bypassed_rules={len(s.bypass_patterns)}"
-            )
-        sessions_section = (
-            "\n".join(session_lines) if session_lines else "  (no active sessions)"
-        )
-
-        # Security rules
-        async with db_session_ctx() as db_sess:
-            rule_repo = RuleRepo(db_sess)
-            rules = await rule_repo.list_all()
-
-        blocked = [r for r in rules if r.level == "BLOCK" and r.enabled]
-        confirm = [r for r in rules if r.level == "CONFIRM" and r.enabled]
-        warn = [r for r in rules if r.level == "WARN" and r.enabled]
-
-        # Pool
-        pool_nodes = list(pool._registry.keys())
-        total_idle = sum(len(q) for q in pool._idle.values())
-        total_active = sum(pool._active.values())
-
-        return (
-            "# Shuttle Environment Overview\n\n"
-            f"## Nodes ({len(nodes)})\n{nodes_section}\n\n"
-            f"## Active Sessions ({len(active)})\n{sessions_section}\n\n"
-            f"## Security Rules ({len(rules)} total)\n"
-            f"  BLOCK: {len(blocked)} rules — commands matching these are rejected\n"
-            f"  CONFIRM: {len(confirm)} rules — require explicit confirmation token\n"
-            f"  WARN: {len(warn)} rules — allowed but logged with warning\n\n"
-            f"## Connection Pool\n"
-            f"  Registered: {len(pool_nodes)} nodes\n"
-            f"  Active connections: {total_active}\n"
-            f"  Idle connections: {total_idle}\n\n"
-            "## Available Tools\n"
-            "  • ssh_run(command, node) — execute command on a node\n"
-            "  • ssh_list_nodes() — list configured nodes\n"
-            "  • ssh_upload(node, local_path, remote_path) — SFTP upload\n"
-            "  • ssh_download(node, remote_path, local_path) — SFTP download\n"
-            "  • ssh_add_node(...) — add a new SSH node\n\n"
-            "Use `shuttle://security-rules` resource to see exact rule patterns "
-            "before running commands that might be blocked."
-        )
-
-    @mcp.prompt()
     async def safe_command_check(command: str, node: str | None = None) -> str:
         """Check if a command is safe to run before executing it.
 
@@ -189,7 +115,7 @@ def register_prompts(
             node_obj = await repo.get_by_name(node)
 
         if not node_obj:
-            return f"Node **{node}** not found. Run `ssh_list_nodes()` to see available nodes."
+            return f"Node **{node}** not found. Read the `shuttle://nodes` resource to see available nodes."
 
         # Active session
         active = session_mgr.list_active()

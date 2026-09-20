@@ -9,6 +9,7 @@ Uses ``fastmcp.Client(server)`` (in-memory MCP protocol) instead of
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -40,13 +41,6 @@ def _patched_session_mgr():
     return mock_session_mgr
 
 
-def _result_text(result) -> str:
-    """Extract text from a FastMCP CallToolResult."""
-    if hasattr(result, "content") and result.content:
-        return result.content[0].text
-    return str(result)
-
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -54,7 +48,7 @@ def _result_text(result) -> str:
 
 @pytest.mark.asyncio
 async def test_mcp_server_starts_and_lists_nodes(tmp_path):
-    """Full integration: server starts, tools are registered, ssh_list_nodes works."""
+    """Full integration: server starts, tools are registered, shuttle://nodes works."""
     shuttle_dir = tmp_path / ".shuttle"
     shuttle_dir.mkdir()
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
@@ -74,17 +68,16 @@ async def test_mcp_server_starts_and_lists_nodes(tmp_path):
 
     tools = await mcp.get_tools()
     tool_names = set(tools.keys())
-    required_tools = {"ssh_run", "ssh_list_nodes", "ssh_add_node"}
+    required_tools = {"ssh_run", "ssh_add_node"}
     assert required_tools.issubset(tool_names), (
         f"Missing tools: {required_tools - tool_names}"
     )
 
     async with Client(mcp) as client:
-        result = await client.call_tool("ssh_list_nodes", {})
+        result = await client.read_resource("shuttle://nodes")
 
-    text = _result_text(result)
-    assert isinstance(text, str)
-    assert "No nodes configured" in text
+    data = json.loads(result[0].text)
+    assert data == {"nodes": [], "total": 0}
 
 
 @pytest.mark.asyncio

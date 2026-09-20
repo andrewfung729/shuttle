@@ -1,6 +1,6 @@
-# MCP Tools API Reference
+# MCP API Reference
 
-Shuttle exposes 5 MCP tools that AI assistants call automatically. This page documents every tool's parameters, return format, and usage examples.
+Shuttle exposes 4 MCP tools and 6 MCP resources. Tools are actions the AI calls; resources are read-only runtime state the AI reads for context. This page documents every tool's parameters, return format, and usage examples.
 
 ## ssh_run
 
@@ -35,26 +35,6 @@ AI ← "Fri Mar 21 17:07:21 2026\n+---------------------+\n| NVIDIA-SMI 580.105 
 AI → ssh_run(node="gpu-server", command="cd /workspace && pwd")
 AI ← "/workspace"   # working directory preserved for next call
 ```
-
-______________________________________________________________________
-
-## ssh_list_nodes
-
-List all configured SSH nodes with their connection status.
-
-| Parameter | Type | Required | Description |
-| --------- | ---- | -------- | ----------- |
-| *(none)*  | —    | —        | —           |
-
-**Returns:** One line per node with status icon, name, host, port, and username.
-
-```
-[OK] gpu-server  (10.0.0.1:22, user=root)
-[OK] staging     (staging.example.com:22, user=deploy)
-[--] dev-box     (192.168.1.10:22, user=dev)
-```
-
-Status icons: `[OK]` = active, `[--]` = inactive, `[!!]` = error.
 
 ______________________________________________________________________
 
@@ -108,3 +88,45 @@ Add a new SSH node to the Shuttle configuration. The node is registered in the d
 Either `password` or `private_key` must be provided. Credentials are encrypted at rest.
 
 **Returns:** Confirmation with node ID.
+
+______________________________________________________________________
+
+# MCP Resources
+
+Resources are read-only views of Shuttle's live runtime state. AI assistants read them for context without executing commands. Client support varies — some clients (e.g. Claude Code) surface them as `read_*` tools.
+
+## shuttle://nodes
+
+All configured SSH nodes with connection details and status.
+
+**Returns:** JSON — `{"nodes": [...], "total": N}`, each node with `name`, `host`, `port`, `username`, `status`, `auth_type`, `tags`, `last_seen_at`.
+
+## shuttle://nodes/{name}
+
+Detailed information for one node, including its connection pool state.
+
+**Returns:** JSON — node fields as above, plus `pool` (`active_connections`, `idle_connections`, `registered`) and `created_at`/`updated_at`. Returns `{"error": "Node '...' not found"}` for unknown names.
+
+## shuttle://security-rules
+
+All security rules governing command execution, grouped by level.
+
+**Returns:** JSON — `{"rules": [...], "total": N, "by_level": {"BLOCK": n, "CONFIRM": n, ...}}`, each rule with `id`, `pattern`, `level`, `description`, `priority`, `enabled`, `node_id`. Read this before running commands that might be blocked or need approval.
+
+## shuttle://sessions
+
+Currently active SSH sessions.
+
+**Returns:** JSON — each session with `session_id`, `node_id`, `working_directory`, `bypass_patterns`, `env_vars`. Useful to check which node has an existing session (and its cwd) before calling `ssh_run`.
+
+## shuttle://pool-status
+
+Connection pool health.
+
+**Returns:** JSON — `config` (`max_per_node`, `max_total`, `idle_timeout_s`, `max_lifetime_s`), `global_active`, `registered_nodes`, and per-node `active`/`idle` counts. Use to diagnose connection exhaustion.
+
+## shuttle://logs/{node_name}/recent
+
+Recent command execution history for a node (last 20 commands).
+
+**Returns:** JSON — each log with `command`, `exit_code`, `security_level`, `bypassed`, `duration_ms`, `executed_at`. Returns `{"error": "Node '...' not found"}` for unknown names.

@@ -10,7 +10,6 @@ from shuttle.mcp.server import create_mcp_server
 
 EXPECTED_TOOLS = {
     "ssh_run",
-    "ssh_list_nodes",
     "ssh_upload",
     "ssh_download",
     "ssh_add_node",

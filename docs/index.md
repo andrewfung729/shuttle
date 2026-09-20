@@ -55,8 +55,9 @@ AI assistants get these tools automatically:
 | `ssh_run`        | Run a command on a remote node (sessions auto-managed) |
 | `ssh_upload`     | Upload a file via SFTP                                 |
 | `ssh_download`   | Download a file via SFTP                               |
-| `ssh_list_nodes` | List all configured nodes                              |
 | `ssh_add_node`   | Add a new SSH node                                     |
+
+AI assistants also get 6 read-only resources with live runtime state: nodes (`shuttle://nodes`), per-node detail, security rules, active sessions, pool status, and recent command logs. See the [MCP API Reference](api.md) for the full list.
 
 ## Architecture
 
