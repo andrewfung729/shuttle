@@ -11,6 +11,7 @@ per node so that working directory context is preserved across calls.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -322,32 +323,33 @@ def register_tools(
     async def ssh_add_node(
         name: str,
         host: str,
+        private_key_path: str,
         port: int = 22,
         username: str = "",
-        password: str | None = None,
-        private_key: str | None = None,
         jump_host: str | None = None,
         tags: list[str] | None = None,
     ) -> str:
-        """Add a new SSH node to the Shuttle configuration."""
-        from shuttle.core.proxy import NodeConnectInfo
+        """Add a new SSH node to the Shuttle configuration (key auth only).
 
-        # Validate credentials
-        if password is None and private_key is None:
-            return "Error: either 'password' or 'private_key' must be provided."
+        Inline secrets are not accepted: private_key_path must point to a key
+        file on the machine running Shuttle (e.g. ~/.ssh/id_ed25519). Shuttle
+        reads it locally, so key material never appears in this conversation.
+        """
+        from shuttle.core.proxy import NodeConnectInfo
 
         if cred_mgr is None:
             return (
                 "Error: credential manager not available — cannot encrypt credentials."
             )
 
-        # Determine auth type and encrypt credential
-        if private_key is not None:
-            auth_type = "key"
-            encrypted = cred_mgr.encrypt(private_key)
-        else:
-            auth_type = "password"
-            encrypted = cred_mgr.encrypt(password)
+        # Read the key locally so the agent never handles key content.
+        key_file = Path(private_key_path).expanduser()
+        if not key_file.is_file():
+            return f"Error: key file not found: {key_file}"
+        plaintext = key_file.read_text()
+        if "PRIVATE KEY-----" not in plaintext:
+            return f"Error: {key_file} does not look like an SSH private key"
+        encrypted = cred_mgr.encrypt(plaintext)
 
         # Resolve jump_host name to UUID if provided
         jump_host_id: str | None = None
@@ -374,7 +376,7 @@ def register_tools(
                 host=host,
                 port=port,
                 username=username,
-                auth_type=auth_type,
+                auth_type="key",
                 encrypted_credential=encrypted,
                 jump_host_id=jump_host_id,
                 tags=tags,
@@ -403,8 +405,8 @@ def register_tools(
             hostname=host,
             port=port,
             username=username,
-            password=password if auth_type == "password" else None,
-            private_key=private_key if auth_type == "key" else None,
+            password=None,
+            private_key=plaintext,
             jump_host=jump_host_info,
         )
         pool.register_node(info)

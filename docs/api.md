@@ -79,13 +79,12 @@ Add a new SSH node to the Shuttle configuration. The node is registered in the d
 | `name`        | string       | yes      | —       | Unique node name                             |
 | `host`        | string       | yes      | —       | Hostname or IP                               |
 | `port`        | int          | no       | 22      | SSH port                                     |
-| `username`    | string       | no       | ""      | SSH username                                 |
-| `password`    | string       | no       | —       | Password auth (or use `private_key`)         |
-| `private_key` | string       | no       | —       | Private key content                          |
-| `jump_host`   | string       | no       | —       | Name of an existing node to use as jump host |
-| `tags`        | list[string] | no       | —       | Tags for categorization                      |
+| `username`         | string      | no       | ""      | SSH username                                 |
+| `private_key_path` | string      | yes      | —       | Path to a private key file on the Shuttle server; read locally so the key content never appears in the agent conversation |
+| `jump_host`        | string      | no       | —       | Name of an existing node to use as jump host |
+| `tags`             | list[string] | no      | —       | Tags for categorization                      |
 
-Either `password` or `private_key` must be provided. Credentials are encrypted at rest.
+Inline secrets (`password`, `private_key`) are not accepted — key auth only, read server-side from `private_key_path`. Credentials are encrypted at rest. Password nodes can be added via the CLI (`shuttle node add`) or web panel instead.
 
 **Returns:** Confirmation with node ID.
 

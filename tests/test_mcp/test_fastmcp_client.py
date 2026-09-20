@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 from contextlib import asynccontextmanager
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -18,6 +20,7 @@ from fastmcp import Client, FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from shuttle.core.credentials import CredentialManager
 from shuttle.core.security import CommandGuard, ConfirmTokenStore
 from shuttle.core.session import SSHSession
 from shuttle.db.models import Base, CommandLog
@@ -78,11 +81,12 @@ async def db_factory(db_engine):
 
 
 @pytest_asyncio.fixture
-async def mcp_server(mock_pool, mock_session_mgr, db_factory):
+async def mcp_server(mock_pool, mock_session_mgr, db_factory, tmp_path):
     """Build a FastMCP server with real DB but mocked SSH."""
     mcp = FastMCP(name="shuttle-test")
     guard = CommandGuard()
     token_store = ConfirmTokenStore()
+    cred_mgr = CredentialManager(tmp_path)
 
     @asynccontextmanager
     async def db_session_ctx():
@@ -108,6 +112,7 @@ async def mcp_server(mock_pool, mock_session_mgr, db_factory):
         session_mgr=mock_session_mgr,
         db_session_ctx=db_session_ctx,
         node_repo_factory=NodeRepo,
+        cred_mgr=cred_mgr,
     )
     register_resources(
         mcp=mcp,
@@ -308,17 +313,108 @@ async def test_run_persists_log_with_correct_node_id(
 
 
 @pytest.mark.asyncio
-async def test_add_node_missing_credentials_via_client(mcp_server):
-    """ssh_add_node without password or key returns an error."""
+async def test_add_node_inline_secrets_rejected(mcp_server):
+    """password/private_key are not in the schema — FastMCP rejects them."""
+    async with Client(mcp_server) as client:
+        with pytest.raises(Exception, match="private_key_path"):
+            await client.call_tool(
+                "ssh_add_node",
+                {"name": "new-node", "host": "1.2.3.4", "username": "user"},
+            )
+
+        with pytest.raises(Exception, match="password"):
+            await client.call_tool(
+                "ssh_add_node",
+                {
+                    "name": "new-node",
+                    "host": "1.2.3.4",
+                    "username": "user",
+                    "private_key_path": "/tmp/k.pem",
+                    "password": "hunter2",
+                },
+            )
+
+        with pytest.raises(Exception, match="private_key"):
+            await client.call_tool(
+                "ssh_add_node",
+                {
+                    "name": "new-node",
+                    "host": "1.2.3.4",
+                    "username": "user",
+                    "private_key_path": "/tmp/k.pem",
+                    "private_key": "FAKE-KEY-CONTENT",
+                },
+            )
+
+
+@pytest.mark.asyncio
+async def test_add_node_key_path_via_client(mcp_server, mock_pool, db_factory):
+    """private_key_path is read server-side; key content never returned to agent."""
+    with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as f:
+        f.write("-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE-KEY-CONTENT\n-----END OPENSSH PRIVATE KEY-----\n")
+        key_path = f.name
+
     async with Client(mcp_server) as client:
         result = await client.call_tool(
             "ssh_add_node",
-            {"name": "new-node", "host": "1.2.3.4", "username": "user"},
+            {
+                "name": "key-node",
+                "host": "10.0.0.9",
+                "username": "deploy",
+                "private_key_path": key_path,
+            },
         )
 
-    text = _result_text(result)
-    assert "Error" in text
-    assert "password" in text.lower() or "private_key" in text.lower()
+    assert "OK: node 'key-node' added" in _result_text(result)
+
+    # Connection pool got the plaintext key, not None
+    info = mock_pool.register_node.call_args.args[0]
+    assert "FAKE-KEY-CONTENT" in info.private_key
+
+    # DB stored encrypted material, not plaintext
+    async with db_factory() as sess:
+        node = await NodeRepo(sess).get_by_name("key-node")
+    assert node.auth_type == "key"
+    assert "FAKE-KEY-CONTENT" not in node.encrypted_credential
+
+    Path(key_path).unlink()
+
+
+@pytest.mark.asyncio
+async def test_add_node_key_path_missing_via_client(mcp_server):
+    """A nonexistent key path returns an error instead of a traceback."""
+    async with Client(mcp_server) as client:
+        result = await client.call_tool(
+            "ssh_add_node",
+            {
+                "name": "ghost",
+                "host": "10.0.0.10",
+                "private_key_path": "/nonexistent/key.pem",
+            },
+        )
+
+    assert "key file not found" in _result_text(result)
+
+
+@pytest.mark.asyncio
+async def test_add_node_key_path_not_a_key_via_client(mcp_server):
+    """A file whose content is not an SSH private key is rejected."""
+    with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as f:
+        f.write("DB_PASSWORD=hunter2\n")
+        bad_path = f.name
+
+    async with Client(mcp_server) as client:
+        result = await client.call_tool(
+            "ssh_add_node",
+            {
+                "name": "sneaky",
+                "host": "10.0.0.11",
+                "private_key_path": bad_path,
+            },
+        )
+
+    assert "does not look like an SSH private key" in _result_text(result)
+    Path(bad_path).unlink()
 
 
 # ---------------------------------------------------------------------------
