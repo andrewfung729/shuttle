@@ -137,6 +137,30 @@ class LogListResponse(BaseModel):
     page_size: int
 
 
+# ── Approvals ──────────────────────────────────────
+
+
+class ApprovalResponse(BaseModel):
+    id: str
+    command: str
+    node_id: str
+    node_name: str | None = None
+    session_id: str | None = None
+    rule_id: str | None = None
+    rule_description: str | None = None
+    bypass_scope: str | None = None
+    status: str
+    requested_at: datetime
+    expires_at: datetime
+    decided_at: datetime | None = None
+    decided_by: str | None = None
+    reject_reason: str | None = None
+    executed_at: datetime | None = None
+    exec_exit_code: int | None = None
+
+    model_config = {"from_attributes": True}
+
+
 # ── Settings ───────────────────────────────────────
 
 

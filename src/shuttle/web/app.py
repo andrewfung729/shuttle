@@ -46,9 +46,19 @@ def create_app(
         allow_headers=["*"],
     )
 
-    from shuttle.web.routes import data, logs, nodes, rules, sessions, settings, stats
+    from shuttle.web.routes import (
+        approvals,
+        data,
+        logs,
+        nodes,
+        rules,
+        sessions,
+        settings,
+        stats,
+    )
 
     app.include_router(stats.router, prefix="/api")
+    app.include_router(approvals.router, prefix="/api")
     app.include_router(nodes.router, prefix="/api")
     app.include_router(rules.router, prefix="/api")
     app.include_router(sessions.router, prefix="/api")

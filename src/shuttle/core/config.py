@@ -28,3 +28,7 @@ class ShuttleConfig(BaseSettings):
     pool_idle_timeout: int = 300
     pool_max_lifetime: int = 3600
     pool_queue_size: int = 10
+
+    # Approval queue (CONFIRM-level commands)
+    approval_ttl: int = 900  # seconds a pending approval stays decidable
+    approval_wait: float = 20.0  # default synchronous wait for progress-less clients

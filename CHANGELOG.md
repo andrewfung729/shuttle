@@ -4,6 +4,15 @@ All notable changes to Shuttle are documented here.
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **Approval queue replaces confirm tokens** — `ssh_run` no longer accepts `confirm_token`; the AI can no longer approve its own commands. CONFIRM-level commands now create a durable approval (DB-backed, survives restarts) that a human decides in the web panel's new **Approvals** page. New `ssh_run` parameters: `approval_id` (re-poll a pending approval — re-send the command byte-for-byte) and `approval_wait` (synchronous wait budget; progress-capable MCP clients extend to the approval TTL automatically). Config: `SHUTTLE_APPROVAL_TTL` (default 900 s), `SHUTTLE_APPROVAL_WAIT` (default 20 s). ADR-0001 has the rationale.
+
+### Added
+
+- Approvals page in the web panel (pending queue with live countdown, reject-reason textarea shown to the AI verbatim, history with exit codes) and REST API: `GET /api/approvals`, `GET /api/approvals/{id}`, `POST /api/approvals/{id}/approve`, `POST /api/approvals/{id}/reject`.
+- Audit trail: `command_logs.stderr` is now persisted (64 KB cap), `command_logs.approval_id` links log rows to approval decisions, and `bypassed` is only true for real bypass paths.
+
 ### Fixed
 
 - **SSH config parser: quoted values** ([#7](https://github.com/enwaiax/shuttle/issues/7)) — `IdentityFile "~/.ssh/id_rsa"` kept its surrounding quotes, so `resolve_key()` failed to find the key and `shuttle node import` silently skipped the host. Single quotes and quoted paths containing spaces are handled too.

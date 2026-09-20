@@ -16,10 +16,10 @@ from shuttle.core.config import ShuttleConfig
 from shuttle.core.connection_pool import ConnectionPool, PoolConfig
 from shuttle.core.credentials import CredentialManager
 from shuttle.core.proxy import NodeConnectInfo
-from shuttle.core.security import CommandGuard, ConfirmTokenStore
+from shuttle.core.security import CommandGuard
 from shuttle.core.session import SessionManager
 from shuttle.db.engine import create_db_engine, create_session_factory, init_db
-from shuttle.db.repository import NodeRepo
+from shuttle.db.repository import ApprovalRepo, NodeRepo
 from shuttle.mcp.prompts import register_prompts
 from shuttle.mcp.resources import register_resources
 from shuttle.mcp.tools import register_tools
@@ -39,7 +39,7 @@ async def create_mcp_server(
     5. Create ConnectionPool with config from ShuttleConfig
     6. Register node connection infos from DB (decrypt credentials, warn on failure)
     7. Start eviction loop
-    8. Create ConfirmTokenStore and SessionManager
+    8. Create SessionManager
     9. Create FastMCP(name="shuttle")
     10. Create db_session_ctx async context manager
     11. Call register_tools with all dependencies
@@ -174,15 +174,13 @@ async def create_mcp_server(
     # ── 7. Eviction loop ────────────────────────────────────────────
     await pool.start_eviction_loop()
 
-    # ── 8. Token store + session manager ────────────────────────────
-    token_store = ConfirmTokenStore()
-
+    # ── 8. Session manager ─────────────────────────────────────────
     @asynccontextmanager
     async def db_session_ctx() -> AsyncIterator[AsyncSession]:
         async with session_factory() as sess:
             yield sess
 
-    session_mgr = SessionManager(pool=pool, db_session_factory=db_session_ctx)
+    session_mgr = SessionManager(pool=pool)
 
     # ── 9. FastMCP ──────────────────────────────────────────────────
     mcp = FastMCP(name="shuttle")
@@ -192,10 +190,11 @@ async def create_mcp_server(
         mcp=mcp,
         pool=pool,
         guard=guard,
-        token_store=token_store,
         session_mgr=session_mgr,
         db_session_ctx=db_session_ctx,
         node_repo_factory=NodeRepo,
+        approval_repo_factory=ApprovalRepo,
+        settings=config,
         cred_mgr=cred_mgr,
     )
     register_prompts(
@@ -269,14 +268,13 @@ async def create_service_app(
     pool = ConnectionPool(config=pool_config)
 
     cred_mgr = CredentialManager(config.shuttle_dir)
-    token_store = ConfirmTokenStore()
 
     @asynccontextmanager
     async def db_session_ctx() -> AsyncIterator[AsyncSession]:
         async with session_factory() as sess:
             yield sess
 
-    session_mgr = SessionManager(pool=pool, db_session_factory=db_session_ctx)
+    session_mgr = SessionManager(pool=pool)
 
     # ── FastMCP + tools + prompts + resources ────────────────────────
     mcp = FastMCP(name="shuttle")
@@ -284,10 +282,11 @@ async def create_service_app(
         mcp=mcp,
         pool=pool,
         guard=guard,
-        token_store=token_store,
         session_mgr=session_mgr,
         db_session_ctx=db_session_ctx,
         node_repo_factory=NodeRepo,
+        approval_repo_factory=ApprovalRepo,
+        settings=config,
         cred_mgr=cred_mgr,
     )
     register_prompts(
@@ -424,10 +423,20 @@ async def create_service_app(
     )
 
     # API routes — token auth applied per-router so /mcp is not gated
-    from shuttle.web.routes import data, logs, nodes, rules, sessions, settings, stats
+    from shuttle.web.routes import (
+        approvals,
+        data,
+        logs,
+        nodes,
+        rules,
+        sessions,
+        settings,
+        stats,
+    )
 
     api_deps = [Depends(verify_token)]
     app.include_router(stats.router, prefix="/api", dependencies=api_deps)
+    app.include_router(approvals.router, prefix="/api", dependencies=api_deps)
     app.include_router(nodes.router, prefix="/api", dependencies=api_deps)
     app.include_router(rules.router, prefix="/api", dependencies=api_deps)
     app.include_router(sessions.router, prefix="/api", dependencies=api_deps)

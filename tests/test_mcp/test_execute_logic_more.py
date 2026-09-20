@@ -7,13 +7,13 @@ warn-level execution, auto-session creation, DB logging, and error tolerance.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from shuttle.core.security import (
     CommandGuard,
-    ConfirmTokenStore,
     SecurityDecision,
     SecurityLevel,
 )
@@ -23,6 +23,82 @@ from shuttle.mcp.tools import MAX_OUTPUT_BYTES, _execute_command_logic, _truncat
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+
+_TEST_SETTINGS = SimpleNamespace(approval_ttl=900, approval_wait=20.0)
+
+
+class FakeApprovalRepo:
+    """In-memory stand-in for ApprovalRepo."""
+
+    def __init__(self, approvals=None):
+        self.approvals = approvals if approvals is not None else {}
+        self._counter = 0
+
+    async def create(
+        self,
+        node_id,
+        command,
+        session_id=None,
+        rule_id=None,
+        rule_description=None,
+        bypass_scope=None,
+        expires_at=None,
+    ):
+        from datetime import UTC, datetime, timedelta
+
+        self._counter += 1
+        ap = MagicMock()
+        ap.id = f"ap-{self._counter}"
+        ap.node_id = node_id
+        ap.command = command
+        ap.session_id = session_id
+        ap.rule_id = rule_id
+        ap.rule_description = rule_description
+        ap.bypass_scope = bypass_scope
+        ap.status = "pending"
+        ap.requested_at = datetime.now(UTC)
+        ap.expires_at = expires_at or datetime.now(UTC) + timedelta(seconds=900)
+        ap.reject_reason = None
+        ap.exec_exit_code = None
+        self.approvals[ap.id] = ap
+        return ap
+
+    async def get(self, approval_id):
+        return self.approvals.get(approval_id)
+
+    async def decide(self, approval_id, decision, reason=None):
+        from datetime import UTC, datetime
+
+        ap = self.approvals.get(approval_id)
+        if ap is None or ap.status != "pending" or ap.expires_at <= datetime.now(UTC):
+            return False
+        ap.status = decision
+        if decision == "rejected":
+            ap.reject_reason = reason
+        return True
+
+    async def claim(self, approval_id):
+        from datetime import UTC, datetime
+
+        ap = self.approvals.get(approval_id)
+        if ap and ap.status == "approved" and ap.expires_at > datetime.now(UTC):
+            ap.status = "executed"
+            return True
+        return False
+
+    async def sweep_expired(self):
+        return 0
+
+    async def set_exec_result(self, approval_id, exit_code):
+        ap = self.approvals.get(approval_id)
+        if ap is not None:
+            ap.exec_exit_code = exit_code
+
+
+def _approval_repo_factory(approvals=None):
+    repo = FakeApprovalRepo(approvals)
+    return lambda _db_sess: repo
 
 
 def _make_guard(level: SecurityLevel, message: str = "", rule: str = "test-rule"):
@@ -101,11 +177,13 @@ async def test_execute_no_node_multi_nodes_error() -> None:
         command="ls",
         node=None,
         timeout=1,
-        confirm_token=None,
+        approval_id=None,
+        approval_wait=None,
         bypass_scope=None,
         pool=MagicMock(),
         guard=guard,
-        token_store=MagicMock(spec=ConfirmTokenStore),
+        approval_repo_factory=_approval_repo_factory,
+        settings=_TEST_SETTINGS,
         session_mgr=MagicMock(spec=SessionManager),
         db_session_ctx=_noop_db_ctx,
         node_repo_factory=lambda _s: repo,
@@ -119,26 +197,27 @@ async def test_execute_no_node_multi_nodes_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_confirm_invalid_token() -> None:
+async def test_execute_confirm_unknown_approval_id() -> None:
+    """An unknown approval_id must error and never execute."""
     session = SSHSession(session_id="s1", node_id="n1")
     guard = _make_guard(SecurityLevel.CONFIRM, message="check", rule="r1")
-    ts = MagicMock(spec=ConfirmTokenStore)
-    ts.validate.return_value = False
 
     out = await _execute_command_logic(
         command="sudo ls",
         node="n1",
         timeout=1,
-        confirm_token="bad",
+        approval_id="does-not-exist",
+        approval_wait=None,
         bypass_scope=None,
         pool=MagicMock(),
         guard=guard,
-        token_store=ts,
+        approval_repo_factory=_approval_repo_factory(),
+        settings=_TEST_SETTINGS,
         session_mgr=_sm_with_session(session),
         db_session_ctx=_noop_db_ctx,
         node_repo_factory=_node_repo_factory,
     )
-    assert "invalid" in out.lower()
+    assert "unknown approval_id" in out
 
 
 @pytest.mark.asyncio
@@ -152,11 +231,13 @@ async def test_execute_warn_still_runs_session_execute() -> None:
             command="curl x",
             node="n1",
             timeout=1,
-            confirm_token=None,
+            approval_id=None,
+            approval_wait=None,
             bypass_scope=None,
             pool=MagicMock(),
             guard=guard,
-            token_store=MagicMock(spec=ConfirmTokenStore),
+            approval_repo_factory=_approval_repo_factory,
+            settings=_TEST_SETTINGS,
             session_mgr=mgr,
             db_session_ctx=_noop_db_ctx,
             node_repo_factory=_node_repo_factory,
@@ -187,11 +268,13 @@ async def test_execute_auto_session_creation_on_pool_node() -> None:
         command="hostname",
         node="n1",
         timeout=1,
-        confirm_token=None,
+        approval_id=None,
+        approval_wait=None,
         bypass_scope=None,
         pool=MagicMock(),
         guard=guard,
-        token_store=MagicMock(spec=ConfirmTokenStore),
+        approval_repo_factory=_approval_repo_factory,
+        settings=_TEST_SETTINGS,
         session_mgr=mgr,
         db_session_ctx=_noop_db_ctx,
         node_repo_factory=_node_repo_factory,
@@ -221,11 +304,13 @@ async def test_execute_persists_command_log_to_db() -> None:
             command="echo hello",
             node="n1",
             timeout=10,
-            confirm_token=None,
+            approval_id=None,
+            approval_wait=None,
             bypass_scope=None,
             pool=MagicMock(),
             guard=guard,
-            token_store=MagicMock(spec=ConfirmTokenStore),
+            approval_repo_factory=_approval_repo_factory,
+            settings=_TEST_SETTINGS,
             session_mgr=mgr,
             db_session_ctx=_noop_db_ctx,
             node_repo_factory=_node_repo_factory,
@@ -244,13 +329,22 @@ async def test_execute_persists_command_log_to_db() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_persists_log_with_confirm_bypassed() -> None:
-    """When confirm_token is provided, bypassed=True in the log entry."""
+async def test_execute_persists_log_with_claimed_approval() -> None:
+    """A claimed approval executes, sets bypassed=True and stamps approval_id."""
+    from datetime import UTC, datetime, timedelta
+
     session = SSHSession(session_id="s1", node_id="n1")
     guard = _make_guard(SecurityLevel.CONFIRM, message="sudo", rule="r1")
 
-    ts = MagicMock(spec=ConfirmTokenStore)
-    ts.validate.return_value = True
+    approvals = {}
+    factory = _approval_repo_factory(approvals)
+    repo = factory(None)
+    ap = await repo.create(
+        node_id="fake-uuid-0001",
+        command="sudo whoami",
+        expires_at=datetime.now(UTC) + timedelta(seconds=60),
+    )
+    await repo.decide(ap.id, "approved")
 
     mgr = _sm_with_session(session, stdout="root")
 
@@ -262,11 +356,13 @@ async def test_execute_persists_log_with_confirm_bypassed() -> None:
             command="sudo whoami",
             node="n1",
             timeout=10,
-            confirm_token="valid-token",
+            approval_id=ap.id,
+            approval_wait=None,
             bypass_scope=None,
             pool=MagicMock(),
             guard=guard,
-            token_store=ts,
+            approval_repo_factory=factory,
+            settings=_TEST_SETTINGS,
             session_mgr=mgr,
             db_session_ctx=_noop_db_ctx,
             node_repo_factory=_node_repo_factory,
@@ -277,6 +373,8 @@ async def test_execute_persists_log_with_confirm_bypassed() -> None:
     kwargs = mock_log_repo.create.call_args.kwargs
     assert kwargs["bypassed"] is True
     assert kwargs["security_level"] == "confirm"
+    assert kwargs["approval_id"] == ap.id
+    assert ap.status == "executed"
 
 
 @pytest.mark.asyncio
@@ -294,11 +392,13 @@ async def test_execute_persists_log_with_nonzero_exit_code() -> None:
             command="false",
             node="n1",
             timeout=10,
-            confirm_token=None,
+            approval_id=None,
+            approval_wait=None,
             bypass_scope=None,
             pool=MagicMock(),
             guard=guard,
-            token_store=MagicMock(spec=ConfirmTokenStore),
+            approval_repo_factory=_approval_repo_factory,
+            settings=_TEST_SETTINGS,
             session_mgr=mgr,
             db_session_ctx=_noop_db_ctx,
             node_repo_factory=_node_repo_factory,
@@ -338,11 +438,13 @@ async def test_execute_updates_node_last_seen_at() -> None:
             command="ls",
             node="n1",
             timeout=10,
-            confirm_token=None,
+            approval_id=None,
+            approval_wait=None,
             bypass_scope=None,
             pool=MagicMock(),
             guard=guard,
-            token_store=MagicMock(spec=ConfirmTokenStore),
+            approval_repo_factory=_approval_repo_factory,
+            settings=_TEST_SETTINGS,
             session_mgr=mgr,
             db_session_ctx=_noop_db_ctx,
             node_repo_factory=tracking_factory,
@@ -366,25 +468,25 @@ async def test_execute_still_returns_stdout_when_db_logging_fails() -> None:
     guard = _make_guard(SecurityLevel.ALLOW)
     mgr = _sm_with_session(session, stdout="important output")
 
-    def _broken_repo_factory(db_sess):
-        repo = MagicMock()
-        repo.get_by_name = AsyncMock(side_effect=RuntimeError("DB down"))
-        repo.list_all = AsyncMock(return_value=[])
-        return repo
+    mock_log_repo = MagicMock()
+    mock_log_repo.create = AsyncMock(side_effect=RuntimeError("DB down"))
 
-    out = await _execute_command_logic(
-        command="echo test",
-        node="n1",
-        timeout=10,
-        confirm_token=None,
-        bypass_scope=None,
-        pool=MagicMock(),
-        guard=guard,
-        token_store=MagicMock(spec=ConfirmTokenStore),
-        session_mgr=mgr,
-        db_session_ctx=_noop_db_ctx,
-        node_repo_factory=_broken_repo_factory,
-    )
+    with patch("shuttle.db.repository.LogRepo", return_value=mock_log_repo):
+        out = await _execute_command_logic(
+            command="echo test",
+            node="n1",
+            timeout=10,
+            approval_id=None,
+            approval_wait=None,
+            bypass_scope=None,
+            pool=MagicMock(),
+            guard=guard,
+            approval_repo_factory=_approval_repo_factory(),
+            settings=_TEST_SETTINGS,
+            session_mgr=mgr,
+            db_session_ctx=_noop_db_ctx,
+            node_repo_factory=_node_repo_factory,
+        )
     assert out == "important output"
 
 
@@ -402,11 +504,13 @@ async def test_execute_still_returns_on_session_execute_error() -> None:
         command="ls",
         node="n1",
         timeout=10,
-        confirm_token=None,
+        approval_id=None,
+        approval_wait=None,
         bypass_scope=None,
         pool=MagicMock(),
         guard=guard,
-        token_store=MagicMock(spec=ConfirmTokenStore),
+        approval_repo_factory=_approval_repo_factory,
+        settings=_TEST_SETTINGS,
         session_mgr=mgr,
         db_session_ctx=_noop_db_ctx,
         node_repo_factory=_node_repo_factory,
@@ -433,11 +537,13 @@ async def test_execute_logs_to_db_even_on_command_error() -> None:
             command="sleep 9999",
             node="n1",
             timeout=1,
-            confirm_token=None,
+            approval_id=None,
+            approval_wait=None,
             bypass_scope=None,
             pool=MagicMock(),
             guard=guard,
-            token_store=MagicMock(spec=ConfirmTokenStore),
+            approval_repo_factory=_approval_repo_factory,
+            settings=_TEST_SETTINGS,
             session_mgr=mgr,
             db_session_ctx=_noop_db_ctx,
             node_repo_factory=_node_repo_factory,
@@ -447,3 +553,204 @@ async def test_execute_logs_to_db_even_on_command_error() -> None:
     mock_log_repo.create.assert_awaited_once()
     kwargs = mock_log_repo.create.call_args.kwargs
     assert kwargs["exit_code"] == -1
+
+
+# ---------------------------------------------------------------------------
+# Approval queue flow (ticket 02 acceptance criteria)
+# ---------------------------------------------------------------------------
+
+
+async def _run_confirm(
+    approvals,
+    *,
+    approval_id=None,
+    approval_wait=None,
+    command="sudo whoami",
+    bypass_scope=None,
+    stdout="root",
+):
+    session = SSHSession(session_id="s1", node_id="n1")
+    guard = _make_guard(SecurityLevel.CONFIRM, message="sudo", rule="r1")
+    mgr = _sm_with_session(session, stdout=stdout)
+    return await _execute_command_logic(
+        command=command,
+        node="n1",
+        timeout=10,
+        approval_id=approval_id,
+        approval_wait=approval_wait,
+        bypass_scope=bypass_scope,
+        pool=MagicMock(),
+        guard=guard,
+        approval_repo_factory=_approval_repo_factory(approvals),
+        settings=_TEST_SETTINGS,
+        session_mgr=mgr,
+        db_session_ctx=_noop_db_ctx,
+        node_repo_factory=_node_repo_factory,
+    )
+
+
+@pytest.mark.asyncio
+async def test_approval_pending_then_rejected_with_reason() -> None:
+    approvals = {}
+    out = await _run_confirm(approvals, approval_wait=0)
+    ap = approvals["ap-1"]
+
+    await _approval_repo_factory(approvals)(None).decide(
+        ap.id, "rejected", reason="use systemctl instead"
+    )
+    out = await _run_confirm(approvals, approval_id=ap.id, command=ap.command)
+    assert "❌ Approval rejected" in out
+    assert "use systemctl instead" in out
+
+
+@pytest.mark.asyncio
+async def test_approval_rejected_without_reason_fallback() -> None:
+    approvals = {}
+    out = await _run_confirm(approvals, approval_wait=0)
+    ap = approvals["ap-1"]
+    await _approval_repo_factory(approvals)(None).decide(ap.id, "rejected")
+    out = await _run_confirm(approvals, approval_id=ap.id, command=ap.command)
+    assert "no reason given" in out
+
+
+@pytest.mark.asyncio
+async def test_approval_replay_reports_already_used() -> None:
+    approvals = {}
+    out = await _run_confirm(approvals, approval_wait=0)
+    ap = approvals["ap-1"]
+    await _approval_repo_factory(approvals)(None).decide(ap.id, "approved")
+    # First claim+execute succeeds...
+    out = await _run_confirm(approvals, approval_id=ap.id, command=ap.command)
+    assert out == "root"
+    # ...replay reports "already used" and never executes again.
+    out = await _run_confirm(approvals, approval_id=ap.id, command=ap.command)
+    assert "already used" in out
+
+
+@pytest.mark.asyncio
+async def test_approval_wrong_command_rejected() -> None:
+    approvals = {}
+    out = await _run_confirm(approvals, approval_wait=0)
+    ap = approvals["ap-1"]
+    await _approval_repo_factory(approvals)(None).decide(ap.id, "approved")
+    out = await _run_confirm(approvals, approval_id=ap.id, command="sudo rm file")
+    assert "different command" in out
+
+
+@pytest.mark.asyncio
+async def test_approval_wrong_node_rejected() -> None:
+    approvals = {}
+    out = await _run_confirm(approvals, approval_wait=0)
+    ap = approvals["ap-1"]
+    await _approval_repo_factory(approvals)(None).decide(ap.id, "approved")
+    ap.node_id = "some-other-node-uuid"
+    out = await _run_confirm(approvals, approval_id=ap.id, command=ap.command)
+    assert "different node" in out
+
+
+@pytest.mark.asyncio
+async def test_approval_expired_reports_expiry() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    approvals = {}
+    out = await _run_confirm(approvals, approval_wait=0)
+    ap = approvals["ap-1"]
+    ap.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    out = await _run_confirm(approvals, approval_id=ap.id, command=ap.command)
+    assert "expired" in out
+
+
+@pytest.mark.asyncio
+async def test_approval_bypass_scope_persisted_on_row() -> None:
+    approvals = {}
+    await _run_confirm(approvals, approval_wait=0, bypass_scope="session")
+    assert approvals["ap-1"].bypass_scope == "session"
+
+
+@pytest.mark.asyncio
+async def test_approval_claim_unlocks_bypass_from_persisted_scope() -> None:
+    """Claim WITHOUT repeating bypass_scope still unlocks the session pattern.
+
+    The re-call recipe only passes approval_id, so the claim call relies on
+    pending_approvals.bypass_scope recorded by the initial call (ticket 07).
+    """
+    approvals = {}
+    session = SSHSession(session_id="s1", node_id="n1")
+    guard = _make_guard(SecurityLevel.CONFIRM, message="sudo", rule="r1")
+    mgr = _sm_with_session(session, stdout="root")
+
+    async def run(**kwargs):
+        kwargs.setdefault("approval_id", None)
+        kwargs.setdefault("approval_wait", None)
+        kwargs.setdefault("bypass_scope", None)
+        return await _execute_command_logic(
+            command="sudo whoami",
+            node="n1",
+            timeout=10,
+            pool=MagicMock(),
+            guard=guard,
+            approval_repo_factory=_approval_repo_factory(approvals),
+            settings=_TEST_SETTINGS,
+            session_mgr=mgr,
+            db_session_ctx=_noop_db_ctx,
+            node_repo_factory=_node_repo_factory,
+            **kwargs,
+        )
+
+    out = await run(approval_wait=0, bypass_scope="session")
+    assert "Approval required" in out
+    assert approvals["ap-1"].bypass_scope == "session"
+
+    await _approval_repo_factory(approvals)(None).decide("ap-1", "approved")
+
+    rule = SimpleNamespace(pattern=r"sudo .*")
+    repo_inst = SimpleNamespace(get_by_id=AsyncMock(return_value=rule))
+    with patch("shuttle.db.repository.RuleRepo", lambda _sess: repo_inst):
+        out = await run(approval_id="ap-1", bypass_scope=None)
+    assert out == "root"
+    assert r"sudo .*" in session.bypass_patterns
+
+
+@pytest.mark.asyncio
+async def test_approval_decision_injected_mid_wait_executes() -> None:
+    """Decision lands between polls — the hybrid wait executes without a second call."""
+    approvals = {}
+    repo = _approval_repo_factory(approvals)(None)
+
+    class MidWaitRepo(FakeApprovalRepo):
+        def __init__(self, inner):
+            self.inner = inner
+            self.polls = 0
+
+        async def get(self, approval_id):
+            ap = await self.inner.get(approval_id)
+            self.polls += 1
+            if self.polls >= 2 and ap.status == "pending":
+                ap.status = "approved"
+            return ap
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    factory = lambda _db_sess: MidWaitRepo(repo)  # noqa: E731
+
+    session = SSHSession(session_id="s1", node_id="n1")
+    guard = _make_guard(SecurityLevel.CONFIRM, message="sudo", rule="r1")
+    mgr = _sm_with_session(session, stdout="root")
+
+    out = await _execute_command_logic(
+        command="sudo whoami",
+        node="n1",
+        timeout=10,
+        approval_id=None,
+        approval_wait=30,  # long enough for a mid-wait decision
+        bypass_scope=None,
+        pool=MagicMock(),
+        guard=guard,
+        approval_repo_factory=factory,
+        settings=_TEST_SETTINGS,
+        session_mgr=mgr,
+        db_session_ctx=_noop_db_ctx,
+        node_repo_factory=_node_repo_factory,
+    )
+    assert out == "root"

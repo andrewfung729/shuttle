@@ -4,8 +4,11 @@ Design
 ------
 * ``SSHSession`` is a plain dataclass that holds all per-session state
   entirely in memory.
-* ``SessionManager`` wraps a ``ConnectionPool`` to run commands and an
-  optional ``db_session_factory`` for persistence.
+* ``SessionManager`` wraps a ``ConnectionPool`` to run commands.
+
+Invariant: ``mcp.tools._execute_command_logic`` is the single audit point for
+command execution — every executed command's CommandLog row is written there.
+No execution path may bypass it.
 * Every command is wrapped as::
 
       cd <working_dir> && <command>; echo ---SHUTTLE_PWD---; pwd
@@ -18,7 +21,6 @@ from __future__ import annotations
 
 import shlex
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -81,19 +83,10 @@ class SessionManager:
     ----------
     pool:
         An initialised ``ConnectionPool`` with nodes already registered.
-    db_session_factory:
-        Optional async callable that returns an async context-manager yielding
-        a DB session.  When provided, session creation and command executions
-        are persisted.  When omitted, everything is in-memory only.
     """
 
-    def __init__(
-        self,
-        pool: Any,
-        db_session_factory: Callable | None = None,
-    ) -> None:
+    def __init__(self, pool: Any) -> None:
         self._pool = pool
-        self._db_session_factory = db_session_factory
         self._sessions: dict[str, SSHSession] = {}
 
     # ------------------------------------------------------------------
@@ -104,8 +97,7 @@ class SessionManager:
         """Create a new session for *node_id*.
 
         Runs ``pwd`` on the remote host to obtain the initial working
-        directory, then stores the session in memory (and persists to DB if a
-        factory is configured).
+        directory, then stores the session in memory.
 
         Parameters
         ----------
@@ -126,8 +118,6 @@ class SessionManager:
             working_directory=working_directory,
         )
         self._sessions[session.session_id] = session
-
-        await self._persist_session(session)
         return session
 
     async def close(self, session_id: str) -> None:
@@ -136,7 +126,6 @@ class SessionManager:
         if session is not None:
             session.status = SessionStatus.CLOSED
             del self._sessions[session_id]
-            await self._persist_session_close(session_id)
 
     def get(self, session_id: str) -> SSHSession | None:
         """Return the active session for *session_id*, or ``None``."""
@@ -205,8 +194,6 @@ class SessionManager:
         if new_pwd:
             session.working_directory = new_pwd
 
-        await self._persist_command_log(session_id, command, stdout)
-
         return {
             "stdout": stdout,
             "stderr": stderr,
@@ -232,25 +219,6 @@ class SessionManager:
                 "stderr": result.stderr or "",
                 "exit_status": result.exit_status,
             }
-
-    async def _persist_session(self, session: SSHSession) -> None:
-        """Persist session creation to DB if a factory is available."""
-        if self._db_session_factory is None:
-            return
-        # Placeholder for actual SQLAlchemy ORM calls.
-        # Implementation depends on the ORM model defined in shuttle.db.
-
-    async def _persist_session_close(self, session_id: str) -> None:
-        """Persist session closure to DB if a factory is available."""
-        if self._db_session_factory is None:
-            return
-
-    async def _persist_command_log(
-        self, session_id: str, command: str, output: str
-    ) -> None:
-        """Persist a command log entry to DB if a factory is available."""
-        if self._db_session_factory is None:
-            return
 
 
 # ---------------------------------------------------------------------------

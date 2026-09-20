@@ -40,6 +40,8 @@ To reset the token, delete `~/.shuttle/web_token` and restart `shuttle serve`.
 
 Note: The `/mcp/` endpoint is **not** gated by this token. MCP clients connect without authentication.
 
+> **Security-relevant since the approval queue:** approving a command in the panel is a **capability** — anyone with panel access can unlock a CONFIRM-level command for execution. If the panel is exposed beyond localhost, always set the API token. (Per-user panel identity is a planned follow-up.)
+
 ## Overview Page
 
 The Overview page is the landing page of the web panel. It shows:
@@ -101,6 +103,22 @@ Select a specific node to view and manage its overrides:
 ### Effective Rules Preview
 
 The rules page shows an **effective rules** view that resolves inheritance — displaying the final set of rules that will actually be applied for a given node, accounting for both global rules and node-specific overrides.
+
+## Approvals Page
+
+CONFIRM-level commands never execute on the AI's word alone. They land here for a human decision.
+
+### Pending Tab
+
+- Full command in monospace, target node, matched rule description, requested-at time, and a live countdown to expiry.
+- **Approve** opens a confirm dialog showing the complete command — review it before confirming. Approving requires no reason.
+- **Reject** opens a dialog with an optional **reason textarea**. Whatever you type is shown to the AI verbatim, so it understands why and how to revise (e.g. "use `systemctl restart nginx` instead").
+- If the row shows a **session bypass notice**, the AI requested that approving also unlocks the matched pattern for the rest of that SSH session.
+- The list refreshes every ~3 seconds while the page is open.
+
+### History Tab
+
+Recent decided, executed, and expired approvals with decided-at time, exit code (for executed rows), and the reject reason where present.
 
 ## Settings Page
 

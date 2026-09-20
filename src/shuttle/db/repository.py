@@ -3,10 +3,17 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shuttle.db.models import AppConfig, CommandLog, Node, SecurityRule, Session
+from shuttle.db.models import (
+    AppConfig,
+    CommandLog,
+    Node,
+    PendingApproval,
+    SecurityRule,
+    Session,
+)
 
 
 class NodeRepo:
@@ -258,6 +265,7 @@ class LogRepo:
         security_rule_id: str | None = None,
         bypassed: bool = False,
         duration_ms: int | None = None,
+        approval_id: str | None = None,
     ) -> CommandLog:
         log = CommandLog(
             session_id=session_id,
@@ -270,6 +278,7 @@ class LogRepo:
             security_rule_id=security_rule_id,
             bypassed=bypassed,
             duration_ms=duration_ms,
+            approval_id=approval_id,
         )
         self._session.add(log)
         await self._session.commit()
@@ -305,6 +314,139 @@ class LogRepo:
             .limit(limit)
         )
         return list(result.scalars().all())
+
+
+class ApprovalRepo:
+    """CRUD + state transitions for PendingApproval records.
+
+    All state flips use conditional UPDATEs so that expiry checks live in the
+    SQL itself — no read→write TOCTOU window, and concurrent callers race on
+    rowcount (exactly one winner).
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(
+        self,
+        node_id: str,
+        command: str,
+        session_id: str | None = None,
+        rule_id: str | None = None,
+        rule_description: str | None = None,
+        bypass_scope: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> PendingApproval:
+        """Create a pending approval. *expires_at* defaults to now + 15 min."""
+        if expires_at is None:
+            expires_at = datetime.now(UTC) + timedelta(seconds=900)
+        approval = PendingApproval(
+            node_id=node_id,
+            command=command,
+            session_id=session_id,
+            rule_id=rule_id,
+            rule_description=rule_description,
+            bypass_scope=bypass_scope,
+            status="pending",
+            expires_at=expires_at,
+        )
+        self._session.add(approval)
+        await self._session.commit()
+        await self._session.refresh(approval)
+        return approval
+
+    async def get(self, approval_id: str) -> PendingApproval | None:
+        result = await self._session.execute(
+            select(PendingApproval)
+            .where(PendingApproval.id == approval_id)
+            .execution_options(populate_existing=True)
+        )
+        return result.scalar_one_or_none()
+
+    async def list(
+        self, status: str | None = None, limit: int = 50
+    ) -> list[PendingApproval]:
+        """List approvals, newest first, optionally filtered by status."""
+        stmt = select(PendingApproval).order_by(PendingApproval.requested_at.desc())
+        if status is not None:
+            stmt = stmt.where(PendingApproval.status == status)
+        result = await self._session.execute(stmt.limit(limit))
+        return list(result.scalars().all())
+
+    async def decide(
+        self,
+        approval_id: str,
+        decision: str,
+        reason: str | None = None,
+    ) -> bool:
+        """Transition pending → approved/rejected.
+
+        Returns True on success, False when the row is unknown, already
+        decided, or past its expiry (the expiry predicate lives in the SQL).
+        """
+        if decision not in ("approved", "rejected"):
+            raise ValueError(f"invalid decision: {decision!r}")
+        values: dict[str, Any] = {
+            "status": decision,
+            "decided_at": datetime.now(UTC),
+        }
+        if decision == "rejected":
+            values["reject_reason"] = reason
+        result = await self._session.execute(
+            update(PendingApproval)
+            .where(
+                PendingApproval.id == approval_id,
+                PendingApproval.status == "pending",
+                PendingApproval.expires_at > datetime.now(UTC),
+            )
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        await self._session.commit()
+        return (result.rowcount or 0) == 1
+
+    async def claim(self, approval_id: str) -> bool:
+        """Atomically transition approved → executed (single-use claim).
+
+        The ``expires_at`` predicate is in the SQL so an approved-but-stale
+        row can never be claimed, even right after it expires.
+        """
+        result = await self._session.execute(
+            update(PendingApproval)
+            .where(
+                PendingApproval.id == approval_id,
+                PendingApproval.status == "approved",
+                PendingApproval.expires_at > datetime.now(UTC),
+            )
+            .values(status="executed", executed_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+        await self._session.commit()
+        return (result.rowcount or 0) == 1
+
+    async def sweep_expired(self) -> int:
+        """Flip stale pending rows to expired; returns how many."""
+        result = await self._session.execute(
+            update(PendingApproval)
+            .where(
+                PendingApproval.status == "pending",
+                PendingApproval.expires_at <= datetime.now(UTC),
+            )
+            .values(status="expired")
+            .execution_options(synchronize_session=False)
+        )
+        await self._session.commit()
+        return result.rowcount or 0
+
+    async def set_exec_result(self, approval_id: str, exit_code: int) -> None:
+        """Back-fill the exit code after the claimed command has run."""
+        await self._session.execute(
+            update(PendingApproval)
+            .where(PendingApproval.id == approval_id)
+            .values(exec_exit_code=exit_code)
+            .execution_options(synchronize_session=False)
+        )
+        await self._session.commit()
 
 
 async def cleanup_old_data(

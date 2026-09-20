@@ -105,6 +105,27 @@ export interface LogListResponse {
   page_size: number;
 }
 
+// ── Approvals ──────────────────────────────────────
+
+export interface ApprovalResponse {
+  id: string;
+  command: string;
+  node_id: string;
+  node_name: string | null;
+  session_id: string | null;
+  rule_id: string | null;
+  rule_description: string | null;
+  bypass_scope: string | null;
+  status: "pending" | "approved" | "rejected" | "expired" | "executed";
+  requested_at: string;
+  expires_at: string;
+  decided_at: string | null;
+  decided_by: string | null;
+  reject_reason: string | null;
+  executed_at: string | null;
+  exec_exit_code: number | null;
+}
+
 // ── Settings ───────────────────────────────────────
 
 export interface SettingsResponse {

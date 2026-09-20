@@ -328,7 +328,7 @@ async def test_execute_keeps_working_directory_when_sentinel_has_no_pwd():
 @pytest.mark.asyncio
 async def test_persist_hooks_noop_without_db_factory():
     pool = make_mock_pool()
-    manager = SessionManager(pool=pool, db_session_factory=None)
+    manager = SessionManager(pool=pool)
     session = await manager.create("node-1")
     await manager.execute(session.session_id, "echo")
     await manager.close(session.session_id)

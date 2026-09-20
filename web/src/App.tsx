@@ -8,6 +8,7 @@ import Login from "./pages/Login";
 import Overview from "./pages/Overview";
 import Activity from "./pages/Activity";
 import Rules from "./pages/Rules";
+import Approvals from "./pages/Approvals";
 import Settings from "./pages/Settings";
 
 export default function App() {
@@ -33,6 +34,7 @@ export default function App() {
           <Route path="/" element={<Overview />} />
           <Route path="/nodes/:nodeId" element={<Activity />} />
           <Route path="/rules" element={<Rules />} />
+          <Route path="/approvals" element={<Approvals />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
       </Routes>

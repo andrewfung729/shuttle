@@ -1,6 +1,4 @@
-"""Tests for CommandGuard and ConfirmTokenStore."""
-
-import time
+"""Tests for CommandGuard."""
 
 import pytest
 import pytest_asyncio
@@ -9,7 +7,6 @@ from sqlalchemy.orm import sessionmaker
 
 from shuttle.core.security import (
     CommandGuard,
-    ConfirmTokenStore,
     SecurityLevel,
 )
 from shuttle.db.models import Base, SecurityRule
@@ -232,62 +229,6 @@ async def test_node_specific_overrides_global(guard_db_session):
 
 
 # ---------------------------------------------------------------------------
-# ConfirmTokenStore tests
-# ---------------------------------------------------------------------------
-
-
-def test_token_create_and_validate():
-    """A freshly created token must validate successfully."""
-    store = ConfirmTokenStore()
-    token = store.create("sudo reboot", "node42")
-    assert store.validate(token, "sudo reboot", "node42") is True
-
-
-def test_token_is_one_time():
-    """A token must not be valid after it has been consumed once."""
-    store = ConfirmTokenStore()
-    token = store.create("sudo reboot", "node42")
-    assert store.validate(token, "sudo reboot", "node42") is True
-    assert store.validate(token, "sudo reboot", "node42") is False
-
-
-def test_token_wrong_command():
-    """A token must not validate if the command differs."""
-    store = ConfirmTokenStore()
-    token = store.create("sudo reboot", "node42")
-    assert store.validate(token, "sudo halt", "node42") is False
-
-
-def test_token_wrong_node():
-    """A token must not validate if the node_id differs."""
-    store = ConfirmTokenStore()
-    token = store.create("sudo reboot", "node42")
-    assert store.validate(token, "sudo reboot", "node99") is False
-
-
-def test_token_expired():
-    """A token used after its TTL must not validate."""
-    store = ConfirmTokenStore(ttl=0.01)  # 10 ms TTL
-    token = store.create("sudo reboot", "node42")
-    time.sleep(0.05)
-    assert store.validate(token, "sudo reboot", "node42") is False
-
-
-def test_token_store_cleanup_when_many_entries(monkeypatch):
-    """Expired entries should be pruned once the store grows past the threshold."""
-    store = ConfirmTokenStore(ttl=0.01)
-    monkeypatch.setattr(
-        "shuttle.core.security._CLEANUP_THRESHOLD",
-        3,
-    )
-    for i in range(4):
-        tok = store.create(f"cmd-{i}", "n")
-        store._store[tok] = (f"cmd-{i}", "n", time.monotonic() - 1.0)
-    store.create("fresh", "n")
-    assert len(store._store) == 1
-    assert any(v[0] == "fresh" for v in store._store.values())
-
-
 @pytest.mark.asyncio
 async def test_evaluate_skips_overlong_regex_pattern(guard_db_session):
     """Patterns longer than 500 chars are ignored (ReDoS guard)."""

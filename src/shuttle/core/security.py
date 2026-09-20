@@ -1,10 +1,8 @@
-"""Command security primitives: SecurityLevel, CommandGuard, ConfirmTokenStore."""
+"""Command security primitives: SecurityLevel, CommandGuard."""
 
 from __future__ import annotations
 
 import re
-import secrets
-import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -31,56 +29,6 @@ class SecurityDecision:
     level: SecurityLevel
     matched_rule: str | None = None
     message: str = ""
-
-
-# ---------------------------------------------------------------------------
-# ConfirmTokenStore
-# ---------------------------------------------------------------------------
-
-_CLEANUP_THRESHOLD = 100
-
-
-class ConfirmTokenStore:
-    """In-memory store for one-time confirmation tokens with TTL.
-
-    Tokens are generated per (command, node_id) pair.  Validating a token
-    consumes it (one-time use).  Expired tokens are pruned lazily when the
-    store grows beyond *_CLEANUP_THRESHOLD* entries.
-    """
-
-    def __init__(self, ttl: float = 300.0) -> None:
-        self._ttl = ttl
-        # token -> (command, node_id, expires_at)
-        self._store: dict[str, tuple[str, str, float]] = {}
-
-    def _maybe_cleanup(self) -> None:
-        """Remove expired tokens if the store is getting large."""
-        if len(self._store) > _CLEANUP_THRESHOLD:
-            now = time.monotonic()
-            expired = [t for t, (_, _, exp) in self._store.items() if exp <= now]
-            for t in expired:
-                del self._store[t]
-
-    def create(self, command: str, node_id: str) -> str:
-        """Create and store a one-time token for the given (command, node_id)."""
-        self._maybe_cleanup()
-        token = secrets.token_urlsafe(32)
-        self._store[token] = (command, node_id, time.monotonic() + self._ttl)
-        return token
-
-    def validate(self, token: str, command: str, node_id: str) -> bool:
-        """Validate *and consume* a token.  Returns False if missing, expired, or mismatched."""
-        entry = self._store.get(token)
-        if entry is None:
-            return False
-        stored_command, stored_node_id, expires_at = entry
-        # Always consume the token regardless of outcome
-        del self._store[token]
-        if time.monotonic() > expires_at:
-            return False
-        return secrets.compare_digest(
-            stored_command, command
-        ) and secrets.compare_digest(stored_node_id, node_id)
 
 
 # ---------------------------------------------------------------------------

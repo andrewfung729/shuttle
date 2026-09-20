@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from shuttle.core.security import (
     CommandGuard,
-    ConfirmTokenStore,
     SecurityDecision,
     SecurityLevel,
 )
@@ -21,6 +21,82 @@ from shuttle.mcp.tools import _execute_command_logic
 # ---------------------------------------------------------------------------
 
 
+_TEST_SETTINGS = SimpleNamespace(approval_ttl=900, approval_wait=20.0)
+
+
+class FakeApprovalRepo:
+    """In-memory stand-in for ApprovalRepo."""
+
+    def __init__(self, approvals=None):
+        self.approvals = approvals if approvals is not None else {}
+        self._counter = 0
+
+    async def create(
+        self,
+        node_id,
+        command,
+        session_id=None,
+        rule_id=None,
+        rule_description=None,
+        bypass_scope=None,
+        expires_at=None,
+    ):
+        from datetime import UTC, datetime, timedelta
+
+        self._counter += 1
+        ap = MagicMock()
+        ap.id = f"ap-{self._counter}"
+        ap.node_id = node_id
+        ap.command = command
+        ap.session_id = session_id
+        ap.rule_id = rule_id
+        ap.rule_description = rule_description
+        ap.bypass_scope = bypass_scope
+        ap.status = "pending"
+        ap.requested_at = datetime.now(UTC)
+        ap.expires_at = expires_at or datetime.now(UTC) + timedelta(seconds=900)
+        ap.reject_reason = None
+        ap.exec_exit_code = None
+        self.approvals[ap.id] = ap
+        return ap
+
+    async def get(self, approval_id):
+        return self.approvals.get(approval_id)
+
+    async def decide(self, approval_id, decision, reason=None):
+        from datetime import UTC, datetime
+
+        ap = self.approvals.get(approval_id)
+        if ap is None or ap.status != "pending" or ap.expires_at <= datetime.now(UTC):
+            return False
+        ap.status = decision
+        if decision == "rejected":
+            ap.reject_reason = reason
+        return True
+
+    async def claim(self, approval_id):
+        from datetime import UTC, datetime
+
+        ap = self.approvals.get(approval_id)
+        if ap and ap.status == "approved" and ap.expires_at > datetime.now(UTC):
+            ap.status = "executed"
+            return True
+        return False
+
+    async def sweep_expired(self):
+        return 0
+
+    async def set_exec_result(self, approval_id, exit_code):
+        ap = self.approvals.get(approval_id)
+        if ap is not None:
+            ap.exec_exit_code = exit_code
+
+
+def _approval_repo_factory(approvals=None):
+    repo = FakeApprovalRepo(approvals)
+    return lambda _db_sess: repo
+
+
 def _make_guard(level: SecurityLevel, message: str = "", rule: str = "test-rule"):
     """Return a CommandGuard mock that always returns the given decision."""
     guard = MagicMock(spec=CommandGuard)
@@ -28,10 +104,6 @@ def _make_guard(level: SecurityLevel, message: str = "", rule: str = "test-rule"
         return_value=SecurityDecision(level=level, matched_rule=rule, message=message)
     )
     return guard
-
-
-def _make_token_store():
-    return MagicMock(spec=ConfirmTokenStore)
 
 
 def _make_session_mgr(session: SSHSession | None = None, execute_result=None):
@@ -106,11 +178,13 @@ async def test_allowed_command_executes():
         command="echo hello",
         node="node1",
         timeout=30,
-        confirm_token=None,
+        approval_id=None,
+        approval_wait=None,
         bypass_scope=None,
         pool=MagicMock(),
         guard=guard,
-        token_store=_make_token_store(),
+        approval_repo_factory=_approval_repo_factory,
+        settings=_TEST_SETTINGS,
         session_mgr=session_mgr,
         db_session_ctx=_noop_db_session,
         node_repo_factory=_noop_node_repo_factory,
@@ -131,11 +205,13 @@ async def test_blocked_command_rejected():
         command="rm -rf /",
         node="node1",
         timeout=30,
-        confirm_token=None,
+        approval_id=None,
+        approval_wait=None,
         bypass_scope=None,
         pool=MagicMock(),
         guard=guard,
-        token_store=_make_token_store(),
+        approval_repo_factory=_approval_repo_factory,
+        settings=_TEST_SETTINGS,
         session_mgr=session_mgr,
         db_session_ctx=_noop_db_session,
         node_repo_factory=_noop_node_repo_factory,
@@ -147,31 +223,39 @@ async def test_blocked_command_rejected():
 
 
 @pytest.mark.asyncio
-async def test_confirm_returns_token_request():
-    """When guard returns CONFIRM without a token, a confirmation message with token is returned."""
+async def test_confirm_creates_pending_approval_zero_wait():
+    """CONFIRM + approval_wait=0 creates a pending approval and returns the
+    pending message with approval_id, unquoted command line, and re-call recipe."""
     session = SSHSession(session_id="s1", node_id="node1")
     guard = _make_guard(SecurityLevel.CONFIRM, message="Needs approval")
-    token_store = _make_token_store()
-    token_store.create.return_value = "tok_abc123"
+    approvals = {}
     session_mgr = _make_session_mgr(session=session)
 
     result = await _execute_command_logic(
         command="shutdown -h now",
         node="node1",
         timeout=30,
-        confirm_token=None,
+        approval_id=None,
+        approval_wait=0,
         bypass_scope=None,
         pool=MagicMock(),
         guard=guard,
-        token_store=token_store,
+        approval_repo_factory=_approval_repo_factory(approvals),
+        settings=_TEST_SETTINGS,
         session_mgr=session_mgr,
         db_session_ctx=_noop_db_session,
         node_repo_factory=_noop_node_repo_factory,
     )
 
-    assert "confirm_token" in result
-    assert "tok_abc123" in result
-    token_store.create.assert_called_once_with("shutdown -h now", "node1")
+    assert "⏳ Approval required" in result
+    assert "Approval required (id: ap-1)" in result
+    assert "Command: shutdown -h now\n" in result  # command on its own unquoted line
+    assert 'approval_id="ap-1"' in result
+    assert "byte-for-byte" in result
+    assert len(approvals) == 1
+    ap = approvals["ap-1"]
+    assert ap.status == "pending"
+    assert ap.command == "shutdown -h now"
     session_mgr.execute.assert_not_awaited()
 
 
@@ -192,11 +276,13 @@ async def test_implicit_session_created_when_none_exists():
         command="pwd",
         node="node1",
         timeout=30,
-        confirm_token=None,
+        approval_id=None,
+        approval_wait=None,
         bypass_scope=None,
         pool=MagicMock(),
         guard=guard,
-        token_store=_make_token_store(),
+        approval_repo_factory=_approval_repo_factory,
+        settings=_TEST_SETTINGS,
         session_mgr=session_mgr,
         db_session_ctx=_noop_db_session,
         node_repo_factory=_noop_node_repo_factory,
@@ -228,11 +314,13 @@ async def test_implicit_session_reused_across_calls():
         command="cd /workspace",
         node="node1",
         timeout=30,
-        confirm_token=None,
+        approval_id=None,
+        approval_wait=None,
         bypass_scope=None,
         pool=MagicMock(),
         guard=guard,
-        token_store=_make_token_store(),
+        approval_repo_factory=_approval_repo_factory,
+        settings=_TEST_SETTINGS,
         session_mgr=session_mgr,
         db_session_ctx=_noop_db_session,
         node_repo_factory=_noop_node_repo_factory,
@@ -243,11 +331,13 @@ async def test_implicit_session_reused_across_calls():
         command="pwd",
         node="node1",
         timeout=30,
-        confirm_token=None,
+        approval_id=None,
+        approval_wait=None,
         bypass_scope=None,
         pool=MagicMock(),
         guard=guard,
-        token_store=_make_token_store(),
+        approval_repo_factory=_approval_repo_factory,
+        settings=_TEST_SETTINGS,
         session_mgr=session_mgr,
         db_session_ctx=_noop_db_session,
         node_repo_factory=_noop_node_repo_factory,

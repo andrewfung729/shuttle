@@ -1,5 +1,5 @@
 import { NavLink, useLocation } from "react-router-dom";
-import { Shield, Settings, Server, Sun, Moon } from "lucide-react";
+import { Shield, Settings, Server, Sun, Moon, ClipboardCheck } from "lucide-react";
 import clsx from "clsx";
 import { useApp } from "../hooks/AppContext";
 
@@ -101,6 +101,10 @@ export default function Sidebar() {
         <NavLink to="/rules" className={({ isActive }) => navItemCls(isActive)}>
           <Shield size={14} strokeWidth={1.8} />
           Rules
+        </NavLink>
+        <NavLink to="/approvals" className={({ isActive }) => navItemCls(isActive)}>
+          <ClipboardCheck size={14} strokeWidth={1.8} />
+          Approvals
         </NavLink>
         <NavLink to="/settings" className={({ isActive }) => navItemCls(isActive)}>
           <Settings size={14} strokeWidth={1.8} />

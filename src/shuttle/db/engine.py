@@ -69,6 +69,7 @@ async def init_db(engine: AsyncEngine) -> None:
             "CREATE INDEX IF NOT EXISTS ix_command_logs_session ON command_logs (session_id)",
             "CREATE INDEX IF NOT EXISTS ix_security_rules_node ON security_rules (node_id)",
             "CREATE INDEX IF NOT EXISTS ix_sessions_node_status ON sessions (node_id, status)",
+            "CREATE INDEX IF NOT EXISTS ix_pending_approvals_status ON pending_approvals (status, expires_at)",
         ]:
             try:
                 await conn.execute(text(idx_sql))
@@ -84,6 +85,14 @@ async def init_db(engine: AsyncEngine) -> None:
                     text(
                         "ALTER TABLE security_rules ADD COLUMN source_rule_id VARCHAR(36)"
                     )
+                )
+
+            # Migration: add approval_id to command_logs (approval queue feature)
+            result_cl = await conn.execute(text("PRAGMA table_info(command_logs)"))
+            cl_columns = [row[1] for row in result_cl]
+            if "approval_id" not in cl_columns:
+                await conn.execute(
+                    text("ALTER TABLE command_logs ADD COLUMN approval_id VARCHAR(36)")
                 )
 
             # Migration: add latency_ms + last_seen_at to nodes
@@ -109,6 +118,18 @@ async def init_db(engine: AsyncEngine) -> None:
                     text(
                         "ALTER TABLE security_rules ADD COLUMN source_rule_id VARCHAR(36)"
                     )
+                )
+
+            # Migration: add approval_id to command_logs (approval queue feature)
+            result_cl = await conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'command_logs' AND column_name = 'approval_id'"
+                )
+            )
+            if not result_cl.fetchone():
+                await conn.execute(
+                    text("ALTER TABLE command_logs ADD COLUMN approval_id VARCHAR(36)")
                 )
 
             # Migration: add latency_ms + last_seen_at to nodes

@@ -12,6 +12,7 @@ import re
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -21,10 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from shuttle.core.credentials import CredentialManager
-from shuttle.core.security import CommandGuard, ConfirmTokenStore
+from shuttle.core.security import CommandGuard
 from shuttle.core.session import SSHSession
 from shuttle.db.models import Base, CommandLog
-from shuttle.db.repository import NodeRepo, RuleRepo
+from shuttle.db.repository import ApprovalRepo, NodeRepo, RuleRepo
 from shuttle.mcp.resources import register_resources
 from shuttle.mcp.tools import register_tools
 
@@ -85,7 +86,7 @@ async def mcp_server(mock_pool, mock_session_mgr, db_factory, tmp_path):
     """Build a FastMCP server with real DB but mocked SSH."""
     mcp = FastMCP(name="shuttle-test")
     guard = CommandGuard()
-    token_store = ConfirmTokenStore()
+    settings = SimpleNamespace(approval_ttl=900, approval_wait=20.0)
     cred_mgr = CredentialManager(tmp_path)
 
     @asynccontextmanager
@@ -108,10 +109,11 @@ async def mcp_server(mock_pool, mock_session_mgr, db_factory, tmp_path):
         mcp=mcp,
         pool=mock_pool,
         guard=guard,
-        token_store=token_store,
         session_mgr=mock_session_mgr,
         db_session_ctx=db_session_ctx,
         node_repo_factory=NodeRepo,
+        approval_repo_factory=ApprovalRepo,
+        settings=settings,
         cred_mgr=cred_mgr,
     )
     register_resources(
@@ -228,7 +230,7 @@ async def test_run_blocked_command_via_client(mcp_server_with_session, db_factor
 
 @pytest.mark.asyncio
 async def test_run_confirm_flow_via_client(mcp_server_with_session, db_factory):
-    """CONFIRM-level command returns token request, re-call with token executes."""
+    """CONFIRM command → pending approval (wait=0) → panel approve → re-call executes."""
     async with db_factory() as sess:
         rule_repo = RuleRepo(sess)
         await rule_repo.create(
@@ -240,23 +242,32 @@ async def test_run_confirm_flow_via_client(mcp_server_with_session, db_factory):
 
     async with Client(mcp_server_with_session) as client:
         result1 = await client.call_tool(
-            "ssh_run", {"command": "sudo ls", "node": "test-node"}
+            "ssh_run",
+            {"command": "sudo ls", "node": "test-node", "approval_wait": 0},
         )
         text1 = _result_text(result1)
-        assert "confirm_token" in text1
+        assert "Approval required" in text1
 
-        import re
+        match = re.search(r'approval_id="([^"]+)"', text1)
+        assert match, f"Could not find approval_id in: {text1}"
+        approval_id = match.group(1)
 
-        match = re.search(r'confirm_token="([^"]+)"', text1)
-        assert match, f"Could not find confirm_token in: {text1}"
-        token = match.group(1)
+        # Human approves in the panel.
+        async with db_factory() as sess:
+            assert await ApprovalRepo(sess).decide(approval_id, "approved") is True
 
+        # AI re-calls with the same command byte-for-byte plus approval_id.
         result2 = await client.call_tool(
             "ssh_run",
-            {"command": "sudo ls", "node": "test-node", "confirm_token": token},
+            {"command": "sudo ls", "node": "test-node", "approval_id": approval_id},
         )
         text2 = _result_text(result2)
         assert "mocked output" in text2
+
+        # Approval row is now executed (single-use claim).
+        async with db_factory() as sess:
+            ap = await ApprovalRepo(sess).get(approval_id)
+            assert ap.status == "executed"
 
 
 # ---------------------------------------------------------------------------

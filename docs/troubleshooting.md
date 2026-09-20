@@ -86,14 +86,34 @@ Ensure `uvx shuttle-mcp --help` works, or run `uv tool install shuttle-mcp` and 
 1. Use the **Rule Tester** (Rules page → Test button) to see which rule matches
 1. Adjust or delete the overly broad rule
 
-### CONFIRM token flow
+### Approval queue flow
 
-**Symptom:** Command returns "requires confirmation" with a token.
+**Symptom:** Command returns "⏳ Approval required" with an `approval_id`.
 
-This is expected for commands matching `confirm`-level rules (e.g., `sudo`, `rm -rf`). The AI should:
+This is expected for commands matching `confirm`-level rules (e.g., `sudo`, `rm -rf`). A human must approve (or reject) the command in the web panel's **Approvals** page. The AI should re-call `ssh_run` with the SAME command byte-for-byte plus the `approval_id`.
 
-1. Show the user the command and ask for confirmation
-1. Re-call `ssh_run` with the `confirm_token` parameter
+### Approval expired before I could decide
+
+**Symptom:** Approval shows "expired" in the panel, or the AI reports an expiry error.
+
+1. Approvals expire after `SHUTTLE_APPROVAL_TTL` seconds (default 15 minutes) — this is intentional: a stale "yes" is dangerous.
+1. Have the AI resubmit the command; a resubmission always creates a **new** `approval_id`.
+1. If decisions routinely time out, raise the TTL via the `SHUTTLE_APPROVAL_TTL` environment variable.
+
+### AI says approval "already used"
+
+**Symptom:** Re-calling `ssh_run` with an `approval_id` returns "already used (single-use)".
+
+1. Each approval executes exactly once — the AI already consumed it in a previous call.
+1. Check the **Approvals → History** tab: executed approvals show their exit code.
+1. If the command needs to run again, the AI must resubmit it without an `approval_id` to create a new approval.
+
+### Rejected with a reason the AI keeps ignoring
+
+**Symptom:** The AI resubmits essentially the same command after a rejection.
+
+1. The rejection message includes the operator's reason verbatim — make the reason prescriptive ("use `systemctl restart nginx` instead of editing the unit file"), not just "unsafe".
+1. If a pattern should never run at all, add a **block** rule instead of rejecting repeatedly.
 
 ## Web Panel Issues
 

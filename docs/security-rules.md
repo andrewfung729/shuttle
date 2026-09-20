@@ -103,32 +103,39 @@ Result:
 
 In the web panel, navigate to **Security Rules**, select a node, and add a rule with the same pattern but a different level. The `source_rule_id` field can optionally reference the global rule being overridden for traceability.
 
-## Confirm Token Mechanism
+## Approval Queue
 
-When a command matches a **confirm**-level rule, Shuttle does not execute it. Instead, it returns a response containing:
+When a command matches a **confirm**-level rule, Shuttle does not execute it. Instead, it creates a durable **approval request** and returns a pending message to the AI:
 
-- The matched rule description
-- A one-time **confirm token**
+```
+⏳ Approval required (id: <approval_id>)
+Command: <command>
+Node: <node>  Rule: <description>
+A human must approve this in the Shuttle web panel (Approvals page).
+To check the decision, re-call ssh_run with the SAME command byte-for-byte
+(do not reformat or re-quote) plus: approval_id="<approval_id>"
+```
 
-### How Bypass Works
+The decision is made by a **human in the web panel** (Approvals page) — never by the AI. The AI can only observe the decision, so a compromised or confused assistant cannot approve its own commands.
 
-1. The AI assistant receives the confirm response and presents it to the user.
-1. The user approves the command.
-1. The AI re-submits the same `ssh_run` call with the `confirm_token` parameter.
-1. Shuttle validates the token:
-   - Token must exist in the in-memory store
-   - Token must match the exact same command and node
-   - Token must not be expired (default TTL: 300 seconds / 5 minutes)
-1. If valid, the token is consumed (one-time use) and the command executes.
-1. Block-level rules **cannot** be bypassed, even with a valid token.
+### The Approval Loop
 
-### Token Properties
+1. The AI calls `ssh_run` with a confirm-level command and receives the pending message above.
+1. A human opens the **Approvals** page in the web panel, reviews the full command, and clicks **Approve** (or **Reject**, optionally with a reason that is shown to the AI verbatim).
+1. The AI re-calls `ssh_run` with the **same command byte-for-byte** plus the `approval_id`.
+1. Shuttle claims the approval atomically (single-use) and executes.
+1. Block-level rules **cannot** be bypassed, even with an approved approval.
 
-- Generated using `secrets.token_urlsafe(32)` (cryptographically random)
-- Stored in-memory only (not persisted to database)
-- Single-use: consumed on validation regardless of outcome
-- TTL: 300 seconds by default
-- Lazy cleanup: expired tokens are pruned when the store exceeds 100 entries
+While the AI's first call is still open, Shuttle **waits** for the decision: progress-capable MCP clients get heartbeats and the wait extends up to the approval TTL (default 15 minutes); simpler clients get a response after ~20 seconds and simply re-poll with the `approval_id`.
+
+### Approval Properties
+
+- **Durable**: stored in the database (`pending_approvals`), survives restarts and works across multiple server processes.
+- **Binding**: an approval authorizes exactly `(command, node_id)`, byte-exact. A different command or node with the same `approval_id` is an error.
+- **Single-use**: once claimed, the approval is marked `executed` and can never be reused — a replay returns "already used".
+- **TTL**: approvals expire after `SHUTTLE_APPROVAL_TTL` seconds (default 900). Expired approvals can be neither approved nor claimed.
+- **Rejection reasons**: when rejecting, the operator may supply a reason; it appears verbatim in the AI's rejection message so the agent knows how to revise.
+- **Session bypass**: if the AI passed `bypass_scope="session"` when claiming, the matched rule pattern is added to the session's bypass set — subsequent commands matching that pattern run without a new approval.
 
 ## Best Practices
 

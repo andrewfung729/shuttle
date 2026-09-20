@@ -83,8 +83,13 @@ def register_prompts(
         advice = {
             "BLOCK": "This command will be rejected. Rephrase or use an alternative approach.",
             "CONFIRM": (
-                "This command requires confirmation. Call ssh_run() first to get a "
-                "confirm_token, then call ssh_run() again with that token."
+                "This command requires human approval. Call ssh_run() and it will wait "
+                "or return a pending message with an approval_id; a human decides in the "
+                "Shuttle web panel (Approvals page). If you get an approval_id, re-call "
+                "ssh_run() with the SAME command verbatim (byte-for-byte, no reformatting "
+                'or re-quoting) plus that approval_id. Keep bypass_scope="session" on '
+                "the re-call if you intended a session bypass. If the approval is "
+                "rejected, read the Reason: line before deciding how to revise."
             ),
             "WARN": "This command is allowed but will be logged with a warning. Proceed if intended.",
         }.get(highest_level, "Proceed normally.")

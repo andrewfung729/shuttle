@@ -1,0 +1,6 @@
+{
+  "packages": [
+    "git:github.com/DietrichGebert/ponytail",
+    "npm:pi-mcp-adapter"
+  ]
+}

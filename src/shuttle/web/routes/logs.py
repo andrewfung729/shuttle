@@ -10,19 +10,12 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shuttle.db.models import CommandLog, Node
+from shuttle.db.models import CommandLog
 from shuttle.web.deps import get_db_session
+from shuttle.web.routes._helpers import batch_node_names as _batch_node_names
 from shuttle.web.schemas import LogListResponse
 
 router = APIRouter(tags=["logs"])
-
-
-async def _batch_node_names(db: AsyncSession, node_ids: set[str]) -> dict[str, str]:
-    """Load node names for a set of node IDs."""
-    if not node_ids:
-        return {}
-    result = await db.execute(select(Node.id, Node.name).where(Node.id.in_(node_ids)))
-    return {row.id: row.name for row in result.all()}
 
 
 def _log_to_response(log: CommandLog, node_names: dict[str, str]) -> dict:

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "shuttle": {
+      "url": "http://localhost:9876/mcp/",
+      "disabledTools": [
+        "ssh_add_node"
+      ]
+    }
+  }
+}

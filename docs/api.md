@@ -6,13 +6,14 @@ Shuttle exposes 4 MCP tools and 6 MCP resources. Tools are actions the AI calls;
 
 Run a shell command on a remote SSH node. Sessions are managed automatically: working directory is preserved across calls to the same node. 4-level security checks are applied before execution.
 
-| Parameter       | Type   | Required | Default | Description                                       |
-| --------------- | ------ | -------- | ------- | ------------------------------------------------- |
-| `command`       | string | yes      | —       | Shell command to execute                          |
-| `node`          | string | no       | —       | Node name (auto-selected if only one node exists) |
-| `timeout`       | float  | no       | 30.0    | Command timeout in seconds                        |
-| `confirm_token` | string | no       | —       | Token to confirm a CONFIRM-level command          |
-| `bypass_scope`  | string | no       | —       | Bypass scope for session commands                 |
+| Parameter       | Type   | Required | Default               | Description                                                                                                                 |
+| --------------- | ------ | -------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `command`       | string | yes      | —                     | Shell command to execute                                                                                                    |
+| `node`          | string | no       | —                     | Node name (auto-selected if only one node exists)                                                                           |
+| `timeout`       | float  | no       | 30.0                  | Command timeout in seconds                                                                                                  |
+| `approval_id`   | string | no       | —                     | Existing approval to check (from a pending response)                                                                        |
+| `approval_wait` | float  | no       | server default (20.0) | Seconds to wait synchronously for a decision; `0` returns immediately; progress-capable clients wait up to the approval TTL |
+| `bypass_scope`  | string | no       | —                     | Bypass scope for session commands                                                                                           |
 
 **Returns:** Command output (stdout), or an error/security message.
 
@@ -22,7 +23,7 @@ Run a shell command on a remote SSH node. Sessions are managed automatically: wo
 
 1. Command is evaluated against security rules
 1. `block` → rejected immediately
-1. `confirm` → returns a token; re-call with `confirm_token` to proceed
+1. `confirm` → creates a durable approval and waits; the human decides in the web panel. The pending message includes an `approval_id` — re-call with the SAME command byte-for-byte plus that `approval_id` to pick up the decision (approved → executes; rejected → error with the operator's reason; expired/already-used → clear error)
 1. `warn` → executes with warning logged
 1. `allow` → executes normally
 
