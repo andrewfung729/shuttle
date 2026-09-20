@@ -40,7 +40,7 @@ To reset the token, delete `~/.shuttle/web_token` and restart `shuttle serve`.
 
 Note: The `/mcp/` endpoint is **not** gated by this token. MCP clients connect without authentication.
 
-> **Security-relevant since the approval queue:** approving a command in the panel is a **capability** — anyone with panel access can unlock a CONFIRM-level command for execution. If the panel is exposed beyond localhost, always set the API token. (Per-user panel identity is a planned follow-up.)
+> **Security-relevant:** the panel exposes command history (including output) and lets anyone with access edit Security Rules — editing rules is a **capability**. If the panel is exposed beyond localhost, always set the API token. (Per-user panel identity is a planned follow-up.)
 
 ## Overview Page
 
@@ -69,16 +69,19 @@ The Activity page is a command log viewer that shows every command executed thro
 
 Each log entry includes:
 
-| Field           | Description                                         |
-| --------------- | --------------------------------------------------- |
-| Command         | The executed command text                           |
-| Node            | Which node it ran on                                |
-| Exit code       | Process exit code (0 = success)                     |
-| stdout / stderr | Full command output                                 |
-| Security level  | Which rule level matched (block/confirm/warn/allow) |
-| Duration        | Execution time in milliseconds                      |
-| Timestamp       | When the command was executed                       |
-| Bypassed        | Whether a confirm rule was bypassed with a token    |
+| Field           | Description                                                        |
+| --------------- | ------------------------------------------------------------------ |
+| Command         | The command text                                                   |
+| Node            | Which node it ran on                                               |
+| Exit code       | Process exit code (0 = success; empty for denied commands)         |
+| stdout / stderr | Full command output                                                |
+| Security level  | Which rule level matched (block/review/allow)                      |
+| Gate score      | Calibrated P(safe) for review-level rows, when the gate was called |
+| Gate reason     | For denials: `unsafe`, `error`, or `disabled`                      |
+| Duration        | Execution time in milliseconds                                     |
+| Timestamp       | When the command was executed                                      |
+
+**Denied commands** show a red "denied · reason" badge (plus the gate score when present) and a **create allow rule** shortcut that opens the Rules form pre-filled with the command — fixing a false positive is one explicit policy change. Shuttle never executes a held command or returns its output to the agent.
 
 ## Security Rules Page
 
@@ -103,22 +106,6 @@ Select a specific node to view and manage its overrides:
 ### Effective Rules Preview
 
 The rules page shows an **effective rules** view that resolves inheritance — displaying the final set of rules that will actually be applied for a given node, accounting for both global rules and node-specific overrides.
-
-## Approvals Page
-
-CONFIRM-level commands never execute on the AI's word alone. They land here for a human decision.
-
-### Pending Tab
-
-- Full command in monospace, target node, matched rule description, requested-at time, and a live countdown to expiry.
-- **Approve** opens a confirm dialog showing the complete command — review it before confirming. Approving requires no reason.
-- **Reject** opens a dialog with an optional **reason textarea**. Whatever you type is shown to the AI verbatim, so it understands why and how to revise (e.g. "use `systemctl restart nginx` instead").
-- If the row shows a **session bypass notice**, the AI requested that approving also unlocks the matched pattern for the rest of that SSH session.
-- The list refreshes every ~3 seconds while the page is open.
-
-### History Tab
-
-Recent decided, executed, and expired approvals with decided-at time, exit code (for executed rows), and the reject reason where present.
 
 ## Settings Page
 

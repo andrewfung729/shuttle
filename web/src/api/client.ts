@@ -16,7 +16,6 @@ import type {
   StatsResponse,
   SettingsResponse,
   SettingsUpdate,
-  ApprovalResponse,
 } from "../types";
 
 // ── Fetch wrapper ──────────────────────────────────
@@ -74,44 +73,7 @@ const keys = {
     status ? (["sessions", status] as const) : (["sessions"] as const),
   logs: (params?: LogParams) => ["logs", params] as const,
   settings: ["settings"] as const,
-  approvals: (status?: string) =>
-    status ? (["approvals", status] as const) : (["approvals"] as const),
 };
-
-// ── Approvals ──────────────────────────────────────
-
-export function useApprovals(status?: string) {
-  return useQuery<ApprovalResponse[]>({
-    queryKey: keys.approvals(status),
-    queryFn: () =>
-      apiFetch(`/approvals${status ? `?status=${encodeURIComponent(status)}` : ""}`),
-    refetchInterval: status === "pending" ? 3000 : false,
-  });
-}
-
-export function useApproveApproval() {
-  const qc = useQueryClient();
-  return useMutation<ApprovalResponse, Error, string>({
-    mutationFn: (id) => apiFetch(`/approvals/${id}/approve`, { method: "POST" }),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["approvals"] });
-    },
-  });
-}
-
-export function useRejectApproval() {
-  const qc = useQueryClient();
-  return useMutation<ApprovalResponse, Error, { id: string; reason?: string }>({
-    mutationFn: ({ id, reason }) =>
-      apiFetch(`/approvals/${id}/reject`, {
-        method: "POST",
-        body: JSON.stringify({ reason }),
-      }),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["approvals"] });
-    },
-  });
-}
 
 // ── Stats ──────────────────────────────────────────
 

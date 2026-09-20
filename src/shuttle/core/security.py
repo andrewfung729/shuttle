@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from loguru import logger
 from sqlalchemy import select
 
 if TYPE_CHECKING:
@@ -14,11 +15,10 @@ if TYPE_CHECKING:
 
 
 class SecurityLevel(str, Enum):
-    """Severity levels used when evaluating a command against security rules."""
+    """Security levels used when evaluating a command against security rules."""
 
     BLOCK = "block"
-    CONFIRM = "confirm"
-    WARN = "warn"
+    REVIEW = "review"
     ALLOW = "allow"
 
 
@@ -44,7 +44,6 @@ class CommandGuard:
         command: str,
         node_id: str,
         db_session: AsyncSession,
-        bypass_patterns: list[str] | None = None,
     ) -> SecurityDecision:
         """Evaluate *command* against security rules fetched from the database.
 
@@ -56,9 +55,6 @@ class CommandGuard:
             Identifier of the target node.
         db_session:
             An async SQLAlchemy session used to query rules.
-        bypass_patterns:
-            A list of rule pattern strings that should be skipped
-            (unless the rule is BLOCK).
 
         Returns
         -------
@@ -86,8 +82,6 @@ class CommandGuard:
             else:
                 seen_patterns[rule.pattern] = rule
 
-        bypassed = set(bypass_patterns or [])
-
         for rule in sorted(seen_patterns.values(), key=lambda r: r.priority):
             try:
                 # Limit pattern length to prevent ReDoS
@@ -95,14 +89,17 @@ class CommandGuard:
                     continue
                 compiled = re.compile(rule.pattern)
                 if compiled.search(command):
-                    level = SecurityLevel(rule.level)
-                    if level == SecurityLevel.BLOCK:
-                        return SecurityDecision(
-                            level=level,
-                            matched_rule=rule.id,
-                            message=f"BLOCKED: {rule.description or rule.pattern}",
+                    try:
+                        level = SecurityLevel(rule.level)
+                    except ValueError:
+                        # Unknown level (e.g. legacy confirm/warn rows) — skip
+                        # rather than silently reinterpret. Consistent with the
+                        # invalid-regex skip below.
+                        logger.warning(
+                            "Skipping rule {id} with unknown level {level!r}",
+                            id=rule.id,
+                            level=rule.level,
                         )
-                    if rule.pattern in bypassed:
                         continue
                     return SecurityDecision(
                         level=level,

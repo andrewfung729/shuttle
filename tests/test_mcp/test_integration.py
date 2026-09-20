@@ -112,9 +112,9 @@ async def test_default_security_rules_seeded(tmp_path):
         )
 
         levels = {r.level for r in rules}
-        assert "block" in levels, "Expected at least one 'block' rule"
-        assert "confirm" in levels, "Expected at least one 'confirm' rule"
-        assert "warn" in levels, "Expected at least one 'warn' rule"
+        assert levels == {"block", "review"}, (
+            f"Seeds must only use block/review/allow, got {levels}"
+        )
     finally:
         await engine.dispose()
 

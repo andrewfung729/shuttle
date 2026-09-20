@@ -84,25 +84,7 @@ def test_ssh_session_creation():
     assert session.node_id == "prod-web"
     assert session.working_directory == "~"
     assert session.status == SessionStatus.ACTIVE
-    assert session.bypass_patterns == set()
     assert session.env_vars == {}
-
-
-def test_ssh_session_bypass_patterns():
-    session = SSHSession(session_id="s1", node_id="node-1")
-    session.bypass_patterns.add(r"rm -rf")
-    session.bypass_patterns.add(r"sudo")
-    assert r"rm -rf" in session.bypass_patterns
-    assert r"sudo" in session.bypass_patterns
-    assert len(session.bypass_patterns) == 2
-
-
-def test_ssh_session_bypass_patterns_independence():
-    """Two sessions should have independent bypass_patterns sets."""
-    s1 = SSHSession(session_id="s1", node_id="n")
-    s2 = SSHSession(session_id="s2", node_id="n")
-    s1.bypass_patterns.add("rm")
-    assert "rm" not in s2.bypass_patterns
 
 
 def test_ssh_session_env_vars():

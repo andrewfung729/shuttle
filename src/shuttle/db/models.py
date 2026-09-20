@@ -7,6 +7,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -159,9 +160,10 @@ class CommandLog(Base):
     stderr: Mapped[str | None] = mapped_column(Text, nullable=True)
     security_level: Mapped[str | None] = mapped_column(String(50), nullable=True)
     security_rule_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    # Plain string, no FK — links the log row to its approval decision.
-    approval_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    bypassed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # LLM-gate audit metadata: score for review-level decisions (denials and
+    # passes), reason is one of unsafe | error | disabled for denials.
+    gate_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gate_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     executed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -174,56 +176,6 @@ class CommandLog(Base):
         "Session", back_populates="command_logs"
     )
     node: Mapped["Node"] = relationship("Node", back_populates="command_logs")
-
-
-class PendingApproval(Base):
-    """Durable approval request for CONFIRM-level commands.
-
-    Replaces the in-memory ConfirmTokenStore: the decision is made by a human
-    in the web panel and stored here, so it survives restarts and works across
-    multiple server processes.
-
-    State machine: pending → approved → executed, pending → rejected,
-    pending → expired. ``expires_at`` gates both deciding and claiming.
-    """
-
-    __tablename__ = "pending_approvals"
-    __table_args__ = (Index("ix_pending_approvals_status", "status", "expires_at"),)
-
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
-    node_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("nodes.id"), nullable=False
-    )
-    # Informational only — the originating session may close before the decision.
-    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    # Exact command string; the approval authorizes exactly (command, node_id).
-    command: Mapped[str] = mapped_column(Text, nullable=False)
-    # Plain string, no FK — rules may be deleted later (matches CommandLog.security_rule_id).
-    rule_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    rule_description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Records that the requesting call passed bypass_scope="session".
-    bypass_scope: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
-    requested_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
-    )
-    expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    decided_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    # Reserved for future panel identity; always NULL today.
-    decided_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    reject_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    executed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    exec_exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
-
-    node: Mapped["Node"] = relationship("Node")
 
 
 class AppConfig(Base):

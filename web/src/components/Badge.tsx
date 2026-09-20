@@ -2,8 +2,7 @@ import clsx from "clsx";
 
 const colorMap: Record<string, string> = {
   block: "bg-[var(--red-subtle)] text-[var(--red)]",
-  confirm: "bg-[var(--orange-subtle)] text-[var(--orange)]",
-  warn: "bg-[var(--yellow-subtle)] text-[var(--yellow)]",
+  review: "bg-[var(--orange-subtle)] text-[var(--orange)]",
   allow: "bg-[var(--success-subtle)] text-[var(--success)]",
   active: "bg-[var(--green-subtle)] text-[var(--green)]",
   online: "bg-[var(--green-subtle)] text-[var(--green)]",

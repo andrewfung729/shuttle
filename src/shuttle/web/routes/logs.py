@@ -29,7 +29,9 @@ def _log_to_response(log: CommandLog, node_names: dict[str, str]) -> dict:
         "stdout": log.stdout,
         "stderr": log.stderr,
         "security_level": log.security_level,
-        "bypassed": log.bypassed,
+        "security_rule_id": log.security_rule_id,
+        "gate_score": log.gate_score,
+        "gate_reason": log.gate_reason,
         "duration_ms": log.duration_ms,
         "executed_at": log.executed_at,
     }

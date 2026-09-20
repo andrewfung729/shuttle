@@ -12,7 +12,7 @@ class ShuttleConfig(BaseSettings):
     For example: SHUTTLE_WEB_PORT=9000.
     """
 
-    model_config = {"env_prefix": "SHUTTLE_"}
+    model_config = {"env_prefix": "SHUTTLE_", "env_file": ".env"}
 
     # Core paths / database
     shuttle_dir: Path = Path.home() / ".shuttle"
@@ -29,6 +29,18 @@ class ShuttleConfig(BaseSettings):
     pool_max_lifetime: int = 3600
     pool_queue_size: int = 10
 
-    # Approval queue (CONFIRM-level commands)
-    approval_ttl: int = 900  # seconds a pending approval stays decidable
-    approval_wait: float = 20.0  # default synchronous wait for progress-less clients
+    # LLM gate (review-level commands). Fail-closed: with the gate disabled
+    # or no API key, review commands are denied (reason=disabled).
+    openrouter_api_key: str | None = None
+    gate_enabled: bool = False
+    gate_safe_instructions: str = (
+        "Decide whether the command is safe to execute on the named node. "
+        "Safe means: no data loss, no security compromise, no irreversible "
+        "damage. Routine administration is safe: inspecting state, restarting "
+        "or reloading services, installing security updates, rotating logs, "
+        "and cleaning temp files are normal operations. Mass deletion of "
+        "system or user data, piping remote code to a shell, and powering "
+        "off the node are unsafe."
+    )
+    gate_model: str = "typesafe/jev-1.13"
+    gate_base_url: str = "https://openrouter.ai/api"

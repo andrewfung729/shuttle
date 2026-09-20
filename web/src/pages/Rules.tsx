@@ -1,5 +1,6 @@
-import { useState, useRef, useCallback, useMemo } from "react";
+import { useState, useRef, useCallback, useMemo, useEffect } from "react";
 import { Shield, Plus, Trash2, Pencil, GripVertical, FlaskConical, X, ChevronDown, Globe, Server, ArrowDownRight } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { useRules, useDeleteRule, useReorderRules, useUpdateRule, useNodes, useEffectiveRules } from "../api/client";
 import type { RuleResponse } from "../types";
 import Badge from "../components/Badge";
@@ -165,8 +166,23 @@ export default function Rules() {
   const [testOpen, setTestOpen] = useState(false);
   const [testCmd, setTestCmd] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState("");
+  const [prefill, setPrefill] = useState<{ pattern: string; level: string } | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
   const dragIdx = useRef<number | null>(null);
   const [overIdx, setOverIdx] = useState<number | null>(null);
+
+  // "Create allow rule" shortcut from a denied command-log row:
+  // /rules?pattern=<command>&level=allow opens the form pre-filled.
+  useEffect(() => {
+    const pattern = searchParams.get("pattern");
+    if (pattern) {
+      const level = searchParams.get("level") ?? "allow";
+      setPrefill({ pattern, level });
+      setEditTarget(null);
+      setFormOpen(true);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   const { data: effectiveRules, isLoading: effectiveLoading } = useEffectiveRules(selectedNodeId);
 
@@ -210,6 +226,7 @@ export default function Rules() {
 
   function openAddForm() {
     setEditTarget(null);
+    setPrefill(null);
     setFormOpen(true);
   }
 
@@ -220,7 +237,10 @@ export default function Rules() {
 
   function handleFormClose(open: boolean) {
     setFormOpen(open);
-    if (!open) setEditTarget(null);
+    if (!open) {
+      setEditTarget(null);
+      setPrefill(null);
+    }
   }
 
   return (
@@ -231,7 +251,7 @@ export default function Rules() {
             Security Rules
           </h1>
           <p className="mt-1 text-[13px] text-[var(--text-tertiary)]">
-            Control which commands require confirmation or are blocked.
+            Control which commands are blocked, sent to the LLM gate for review, or allowed.
             Drag to reorder priority.
           </p>
         </div>
@@ -416,7 +436,7 @@ export default function Rules() {
           <EmptyState
             icon={Shield}
             title="No rules configured"
-            description="Add security rules to control command execution. Rules can block, require confirmation, or warn on specific command patterns."
+            description="Add security rules to control command execution. Rules can block, review (LLM gate), or allow specific command patterns."
             action={
               <button
                 onClick={openAddForm}
@@ -464,7 +484,7 @@ export default function Rules() {
         )}
       </div>
 
-      <RuleForm open={formOpen} onOpenChange={handleFormClose} rule={editTarget} />
+      <RuleForm open={formOpen} onOpenChange={handleFormClose} rule={editTarget} prefill={prefill} />
 
       <ConfirmDialog
         open={deleteTarget !== null}

@@ -15,14 +15,43 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shuttle.core.config import ShuttleConfig
 from shuttle.core.connection_pool import ConnectionPool, PoolConfig
 from shuttle.core.credentials import CredentialManager
+from shuttle.core.gate import GATE_TIMEOUT, TypeSafeGate
 from shuttle.core.proxy import NodeConnectInfo
 from shuttle.core.security import CommandGuard
 from shuttle.core.session import SessionManager
 from shuttle.db.engine import create_db_engine, create_session_factory, init_db
-from shuttle.db.repository import ApprovalRepo, NodeRepo
+from shuttle.db.repository import NodeRepo
 from shuttle.mcp.prompts import register_prompts
 from shuttle.mcp.resources import register_resources
 from shuttle.mcp.tools import register_tools
+
+
+def _build_gate(config: ShuttleConfig) -> TypeSafeGate | None:
+    """Construct the LLM gate when enabled and keyed; None otherwise.
+
+    Construction-time twin of mcp.tools._gate_ready's call-time predicate
+    — keep the two in sync. None means review-level commands deny with
+    reason=disabled (fail closed).
+    """
+    if config.gate_enabled and config.openrouter_api_key:
+        logger.info(
+            "LLM gate enabled: model={m} via {url}",
+            m=config.gate_model,
+            url=config.gate_base_url,
+        )
+        return TypeSafeGate(
+            api_key=config.openrouter_api_key,
+            base_url=config.gate_base_url,
+            model=config.gate_model,
+            timeout=GATE_TIMEOUT,
+        )
+    logger.info(
+        "LLM gate disabled (gate_enabled={e}, api_key={k}) — "
+        "review-level commands will be denied",
+        e=config.gate_enabled,
+        k="set" if config.openrouter_api_key else "missing",
+    )
+    return None
 
 
 async def create_mcp_server(
@@ -182,18 +211,27 @@ async def create_mcp_server(
 
     session_mgr = SessionManager(pool=pool)
 
-    # ── 9. FastMCP ──────────────────────────────────────────────────
-    mcp = FastMCP(name="shuttle")
+    # ── 9. LLM gate (closed on server shutdown) ─────────────────────
+    gate = _build_gate(config)
 
-    # ── 10-11. Register tools, prompts, resources ───────────────────
+    # ── 10. FastMCP ─────────────────────────────────────────────────
+    @asynccontextmanager
+    async def _lifespan(server):
+        yield
+        if gate is not None:
+            await gate.aclose()
+
+    mcp = FastMCP(name="shuttle", lifespan=_lifespan)
+
+    # ── 11. Register tools, prompts, resources ──────────────────────
     register_tools(
         mcp=mcp,
         pool=pool,
         guard=guard,
+        gate=gate,
         session_mgr=session_mgr,
         db_session_ctx=db_session_ctx,
         node_repo_factory=NodeRepo,
-        approval_repo_factory=ApprovalRepo,
         settings=config,
         cred_mgr=cred_mgr,
     )
@@ -276,16 +314,19 @@ async def create_service_app(
 
     session_mgr = SessionManager(pool=pool)
 
+    # ── LLM gate (closed on shutdown) ────────────────────────────────
+    gate = _build_gate(config)
+
     # ── FastMCP + tools + prompts + resources ────────────────────────
     mcp = FastMCP(name="shuttle")
     register_tools(
         mcp=mcp,
         pool=pool,
         guard=guard,
+        gate=gate,
         session_mgr=session_mgr,
         db_session_ctx=db_session_ctx,
         node_repo_factory=NodeRepo,
-        approval_repo_factory=ApprovalRepo,
         settings=config,
         cred_mgr=cred_mgr,
     )
@@ -391,6 +432,8 @@ async def create_service_app(
 
         # Shutdown — force close everything with timeout
         async def _shutdown():
+            if gate is not None:
+                await gate.aclose()
             await pool.close_all()
             await engine.dispose()
 
@@ -424,7 +467,6 @@ async def create_service_app(
 
     # API routes — token auth applied per-router so /mcp is not gated
     from shuttle.web.routes import (
-        approvals,
         data,
         logs,
         nodes,
@@ -436,7 +478,6 @@ async def create_service_app(
 
     api_deps = [Depends(verify_token)]
     app.include_router(stats.router, prefix="/api", dependencies=api_deps)
-    app.include_router(approvals.router, prefix="/api", dependencies=api_deps)
     app.include_router(nodes.router, prefix="/api", dependencies=api_deps)
     app.include_router(rules.router, prefix="/api", dependencies=api_deps)
     app.include_router(sessions.router, prefix="/api", dependencies=api_deps)

@@ -12,6 +12,7 @@ import {
   X,
   FileText,
   ClipboardCopy,
+  ShieldPlus,
 } from "lucide-react";
 import { useLogs, useNode } from "../api/client";
 import type { CommandLogResponse } from "../api/client";
@@ -74,7 +75,13 @@ function formatLogAsText(log: CommandLogResponse): string {
   const exit = log.exit_code !== null ? `exit:${log.exit_code}` : "";
   const dur = fmtDuration(log.duration_ms);
   const sec = log.security_level && log.security_level !== "allow" ? `[${log.security_level.toUpperCase()}]` : "";
-  const meta = [sec, exit, dur].filter(Boolean).join("  ");
+  const gate =
+    log.gate_reason !== null
+      ? `[DENIED ${log.gate_reason}${log.gate_score !== null ? ` ${log.gate_score.toFixed(2)}` : ""}]`
+      : isDenied(log)
+        ? "[DENIED]"
+        : "";
+  const meta = [sec, gate, exit, dur].filter(Boolean).join("  ");
   let line = `[${time}] $ ${log.command}`;
   if (meta) line += `  ${meta}`;
 
@@ -88,7 +95,7 @@ function formatLogAsText(log: CommandLogResponse): string {
 }
 
 type TimeRange = "today" | "7d" | "30d" | "all";
-type LevelFilter = "all" | "block" | "confirm" | "warn";
+type LevelFilter = "all" | "block" | "review" | "denied";
 
 function computeSince(range: TimeRange): string | undefined {
   if (range === "all") return undefined;
@@ -126,10 +133,16 @@ function InlineCopyButton({ text }: { text: string }) {
   );
 }
 
+function isDenied(log: CommandLogResponse): boolean {
+  return log.exit_code === null && !!log.security_level;
+}
+
 function Entry({ log }: { log: CommandLogResponse }) {
   const [expanded, setExpanded] = useState(false);
+  const navigate = useNavigate();
 
   const failed = log.exit_code !== null && log.exit_code !== 0;
+  const denied = isDenied(log);
   const sec = log.security_level;
   const hasSec = sec && sec !== "allow";
   const hasOutput = !!(log.stdout || log.stderr);
@@ -147,6 +160,7 @@ function Entry({ log }: { log: CommandLogResponse }) {
       className={clsx(
         "group border-b border-[var(--border-subtle)] transition-colors",
         failed && "bg-[var(--red)]/[0.03]",
+        denied && "bg-[var(--red)]/[0.05]",
       )}
     >
       <div className="flex items-baseline px-5 py-2.5" style={mono}>
@@ -157,7 +171,7 @@ function Entry({ log }: { log: CommandLogResponse }) {
         <span
           className={clsx(
             "flex-1 text-[13px]",
-            failed ? "text-[var(--red)]" : "text-[var(--text-primary)]",
+            failed || denied ? "text-[var(--red)]" : "text-[var(--text-primary)]",
           )}
         >
           {log.command}
@@ -168,17 +182,50 @@ function Entry({ log }: { log: CommandLogResponse }) {
             className={clsx(
               "mx-2 shrink-0 rounded-full px-2.5 py-[2px] text-[10px] font-semibold uppercase",
               sec === "block" && "bg-[var(--red-subtle)] text-[var(--red)]",
-              sec === "confirm" && "bg-[var(--orange-subtle)] text-[var(--orange)]",
-              sec === "warn" && "bg-[var(--yellow-subtle)] text-[var(--yellow)]",
+              sec === "review" && "bg-[var(--orange-subtle)] text-[var(--orange)]",
             )}
           >
             {sec}
           </span>
         )}
+        {denied && (
+          <span className="mr-2 flex shrink-0 items-center gap-2">
+            <span
+              className="rounded-full bg-[var(--red-subtle)] px-2.5 py-[2px] text-[10px] font-semibold uppercase text-[var(--red)]"
+              title={log.gate_reason ?? "matched a block rule"}
+            >
+              denied{log.gate_reason ? ` · ${log.gate_reason}` : ""}
+            </span>
+            {log.gate_score !== null && (
+              <span
+                className="tabular-nums text-[10px] text-[var(--text-quaternary)]"
+                title="LLM gate score (calibrated P(safe))"
+              >
+                {log.gate_score.toFixed(2)}
+              </span>
+            )}
+            <button
+              onClick={() =>
+                navigate(
+                  `/rules?pattern=${encodeURIComponent(log.command)}&level=allow`,
+                )
+              }
+              aria-label="Create allow rule from this command"
+              title="Create an allow rule pre-filled with this command"
+              className="rounded-md p-1 text-[var(--text-muted)] opacity-0 transition-all group-hover:opacity-100 hover:bg-[var(--green-subtle)] hover:text-[var(--green)]"
+            >
+              <ShieldPlus size={12} />
+            </button>
+          </span>
+        )}
         <span
           className={clsx(
             "w-8 shrink-0 text-right text-[11px] tabular-nums",
-            failed ? "text-[var(--red)]" : log.exit_code === 0 ? "text-[var(--green)]" : "text-[var(--text-quaternary)]",
+            failed
+              ? "text-[var(--red)]"
+              : log.exit_code === 0
+                ? "text-[var(--green)]"
+                : "text-[var(--text-quaternary)]",
           )}
         >
           {log.exit_code !== null ? (log.exit_code === 0 ? "0" : String(log.exit_code)) : "·"}
@@ -387,7 +434,9 @@ export default function Activity() {
       const q = searchQuery.toLowerCase();
       result = result.filter((i) => i.command.toLowerCase().includes(q));
     }
-    if (levelFilter !== "all") {
+    if (levelFilter === "denied") {
+      result = result.filter((i) => isDenied(i));
+    } else if (levelFilter !== "all") {
       result = result.filter((i) => i.security_level === levelFilter);
     }
     return result;
@@ -419,9 +468,9 @@ export default function Activity() {
 
   const levels: { label: string; value: LevelFilter }[] = [
     { label: "All", value: "all" },
+    { label: "Denied", value: "denied" },
     { label: "Block", value: "block" },
-    { label: "Confirm", value: "confirm" },
-    { label: "Warn", value: "warn" },
+    { label: "Review", value: "review" },
   ];
 
   if (!nodeId) {
@@ -578,13 +627,11 @@ export default function Activity() {
                 className={clsx(
                   "rounded-md px-2.5 py-1 text-[10px] font-semibold uppercase transition-all duration-200",
                   levelFilter === l.value
-                    ? l.value === "block"
+                    ? l.value === "block" || l.value === "denied"
                       ? "bg-[var(--red-subtle)] text-[var(--red)]"
-                      : l.value === "confirm"
+                      : l.value === "review"
                         ? "bg-[var(--orange-subtle)] text-[var(--orange)]"
-                        : l.value === "warn"
-                          ? "bg-[var(--yellow-subtle)] text-[var(--yellow)]"
-                          : "bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-sm"
+                        : "bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-sm"
                     : "text-[var(--text-quaternary)] hover:text-[var(--text-tertiary)]",
                 )}
               >

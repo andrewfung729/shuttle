@@ -1,237 +1,199 @@
-# Approval Queue — panel-enforced command approval
+# LLM gate replaces human Approval Queue
 
-Status: implemented (backend + web + docs); ticket 07 manual e2e items pending
+Status: implemented
 
-## Problem
+Supersedes the implemented panel Approval Queue (ADR-0001 human-approve path). The old `issues/01`–`07` tickets documenting that system are deleted, not archived — git history is the archaeology.
 
-The current confirm flow (`ConfirmTokenStore`, `src/shuttle/core/security.py`) has three structural flaws:
+## Problem Statement
 
-1. **AI self-approval.** The confirm token is returned *to the AI*, which can re-submit it immediately. Nothing technical requires a human to have seen the command.
-1. **Single-process state.** Tokens live in an in-memory dict: lost on restart, broken under multiple server processes.
-1. **Thin audit.** A consumed token leaves no durable record of who decided what, when.
+Confirm-level commands still require a human in the web panel for every match. Coarse Security Rules (for example `sudo .*`) flood the queue with routine work, slow agents down, and fail when no operator is watching. At the same time, the agent that submitted the command may be compromised or prompt-injected: any protocol that returns an `approval_id`, retry recipe, or rich denial reason is an information channel the attacker can use. The current four-level model (`block` / `confirm` / `warn` / `allow`) plus session Bypass Patterns plus the Approval claim loop is more machinery than the threat model needs.
 
-## Goals
+## Solution
 
-- The approval decision is made **outside the AI's control** — in the web panel, by a human.
-- Approvals are **durable and multi-process safe** (DB-backed).
-- Every decision (approve/reject/expiry) is **auditable** with timestamps.
-- AI-side UX stays simple: one tool (`ssh_run`), hybrid wait, poll via `approval_id`.
-- Fix the audit gaps found in the current implementation along the way.
+Replace human-in-the-loop Approvals with a short gate:
 
-## Non-goals (follow-ups, not this effort)
+1. Security Rules only use three Security Levels: `block`, `review`, `allow`.
+1. `block` denies immediately. `allow` runs. `review` is scored by a decision model via OpenRouter's System One API (default model `typesafe/jev-1.13`; any TypeSafe System One–compatible endpoint works): a single `is_safe` boolean question returning a calibrated probability.
+1. `p ≥ SAFE_THRESHOLD` → execute. Below threshold → deny that command and log it. Gate errors, timeouts, disabled gate, or missing key → same: deny the command, log the reason. Denial is always command-local — nothing else changes state.
+1. The agent receives one fixed error string — `Error: denied by policy` — for every denial path. No scores, rule text, or retry instructions.
+1. Delete the Approval Queue protocol end-to-end (`approval_id`, hybrid wait, claim, bypass, warn, Approvals API/UI, `pending_approvals`). No backward compatibility.
 
-- Notification channels (Slack / email / ntfy) for pending approvals.
-- CLI approval commands (`shuttle approvals approve <id>`).
-- Multi-user panel auth with per-user `decided_by` identity.
-- Approval of `warn`-level commands (warn executes; only confirm-level enters the queue).
+Operators configure `openrouter_api_key`, `gate_enabled`, and `gate_safe_instructions`. With gate off or no key, `review` denies the command (so local dev without a key behaves identically, minus gate calls).
 
-## Design
+There is deliberately **no automatic node freeze** in v1: a compromised agent's review-level commands are each denied and logged; the operator sees the denials and can disable the node or tighten rules manually. Auto-quarantine is a documented v2 candidate.
 
-### Data model: `pending_approvals`
+## User Stories
 
-New table (created by `Base.metadata.create_all` — no hand migration needed for a new table):
+1. As an operator, I want routine review-level commands auto-allowed when the gate scores them safe, so that I am not paged for every `sudo` match.
+1. As an operator, I want clearly unsafe review-level commands denied without my being online at that second, so that a runaway agent cannot execute them.
+1. As an operator, I want every denial recorded in the command log with command, Node, matched rule id/description snapshot, gate score (if any), reason (`unsafe` / `error` / `disabled`), and timestamp, so that audits and rule tuning have the data they need.
+1. As an operator, I want a denied log row to offer a "create allow rule" shortcut that opens the Rules form pre-filled with the command, so that fixing a false positive is one explicit policy change — never an execute-and-return-output back to the agent.
+1. As an operator, I want block-level Security Rules to hard-deny without calling the gate, so that known-destructive patterns never depend on a model or network.
+1. As an operator, I want allow-level commands to skip the gate, so that cheap read-only work stays fast and cheap.
+1. As an operator, I want existing confirm-level seed rules migrated to review, so that privileged patterns still enter the LLM gate.
+1. As an operator, I want warn-level rules removed, so that unused severity does not clutter policy.
+1. As an operator, I want session Bypass Patterns removed, so that no trusted-session hole undermines the gate.
+1. As an agent (MCP client), I want `ssh_run` to simply run or return a fixed denial, so that I do not implement approval polling.
+1. As an agent, when a command is denied by policy, I want the error `Error: denied by policy`, so that I get no actionable detail to attack with.
+1. As an agent, I want no `approval_id`, `approval_wait`, `confirm_token`, or `bypass_scope` parameters, so that the tool surface stays small.
+1. As an operator, I want `SHUTTLE_OPENROUTER_API_KEY` (or equivalent settings field) to enable gate calls, so that credentials live in config not code.
+1. As an operator, I want `SHUTTLE_GATE_ENABLED` to turn the gate on or off, so that I can disable model calls without deleting rules.
+1. As an operator, when the gate is disabled or the API key is missing, I want review matches to deny the command, so that developer laptops without OpenRouter access still fail closed.
+1. As an operator, I want `SHUTTLE_GATE_SAFE_INSTRUCTIONS` to override the judge instructions text, so that I can tune what "safe" means without a code change.
+1. As an operator, I want the safe-score threshold to be a code constant, so that security posture is not an ops freestyle dial.
+1. As an operator, I want gate timeouts and transport errors to deny the command under enforce, so that fail-open is impossible when the gate is on.
+1. As an operator, I want CommandLog rows for denied and executed commands to remain the system of record, so that no parallel audit store is needed.
+1. As an operator, I want the Security Rules UI to offer only block/review/allow, so that policy language matches the new model.
+1. As a deployer, I want a breaking release with no compatibility shims for old approval rows, MCP params, or `confirm`/`warn` level strings in code paths, so that the old protocol cannot linger.
+1. As a deployer, I want seed data and docs updated in the same change, so that a fresh install only knows block/review/allow.
+1. As a security reviewer, I want the judge model to see only command text plus Node name in state (no session history, secrets, or full rule corpus), so that the model input stays minimal.
+1. As a security reviewer, I want the agent to never observe gate probabilities, so that scores cannot be used as a search signal.
+1. As a developer, I want the gate client injected behind a narrow port, so that tests never call the real endpoint.
+1. As a developer, I want unit/integration tests at the `ssh_run` orchestration seam covering the block/review/allow/deny matrix, so that regressions in the gate are caught without UI tests.
+1. As an agent author reading prompts/docs, I want MCP prompts and tool descriptions to stop teaching approval polling, so that agents do not look for a dead protocol.
+1. As a maintainer, I want CONTEXT.md and security docs to replace Approval / Bypass vocabulary with review level and LLM Gate, so that agents working in-repo use the new language.
 
-| Column             | Type                                    | Notes                                                                                                                                          |
-| ------------------ | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`               | String(36) PK                           | uuid4                                                                                                                                          |
-| `node_id`          | String(36), FK nodes.id, NOT NULL       | target node                                                                                                                                    |
-| `session_id`       | String(36), nullable                    | informational; session may close before decision                                                                                               |
-| `command`          | Text, NOT NULL                          | exact command string, binding for execution                                                                                                    |
-| `rule_id`          | String(36), nullable                    | plain string, no FK (matches `CommandLog.security_rule_id` pattern; rules may be deleted later)                                                |
-| `rule_description` | Text, nullable                          | snapshot at request time, shown in panel                                                                                                       |
-| `bypass_scope`     | String(20), nullable                    | records that the requesting call passed `bypass_scope="session"`; drives the panel notice and persists independently of when the claim happens |
-| `status`           | String(20), NOT NULL, default `pending` | `pending / approved / rejected / expired / executed`                                                                                           |
-| `requested_at`     | DateTime(tz), NOT NULL                  |                                                                                                                                                |
-| `expires_at`       | DateTime(tz), NOT NULL                  | `requested_at + approval_ttl`                                                                                                                  |
-| `decided_at`       | DateTime(tz), nullable                  | set on approve/reject                                                                                                                          |
-| `decided_by`       | String(100), nullable                   | reserved for future panel identity; always NULL today                                                                                          |
-| `reject_reason`    | Text, nullable                          | operator-supplied reason surfaced to the AI on rejection (capped at 2000 chars server-side); lets the agent understand why and how to revise   |
-| `executed_at`      | DateTime(tz), nullable                  | set when the approval is claimed for execution                                                                                                 |
-| `exec_exit_code`   | Integer, nullable                       | filled after execution, links to CommandLog                                                                                                    |
+## Implementation Decisions
 
-Indexes: `ix_pending_approvals_status (status, expires_at)` — added to the idempotent index list in `init_db`.
+### Domain model (glossary impact)
 
-State machine:
+- **Security Level** values become: `block`, `review`, `allow` only. Remove `confirm` and `warn` from the enum, seeds, API validation, and UI.
+- **Approval** and **Approval Queue** are removed as live domain concepts. Historical ADR-0001 remains as history; this feature supersedes its runtime behavior. A follow-up ADR should record the replacement (not blocking for implementation).
+- **Bypass Pattern** is removed.
+- **LLM Gate**: the review-level branch that calls the gate and maps the calibrated score to execute or deny.
+- There is no Hold Event or Node Quarantine concept in v1 — gate denials are ordinary command-log rows.
 
-```
-pending ──approve──► approved ──claim (atomic)──► executed
-   │
-   ├──reject───► rejected                (claim = status flip + executed_at,
-   │                                       done BEFORE the command runs)
-   └──expire───► expired
+### Command path
 
-expiry: any row still `pending` past `expires_at` → `expired` (swept on read)
-note: an `approved` row past `expires_at` also refuses to be claimed
-```
-
-### `ssh_run` API (breaking change)
-
-```python
-ssh_run(
-    command: str,
-    node: str | None = None,
-    timeout: float = 30.0,
-    approval_id: str | None = None,   # replaces confirm_token
-    approval_wait: float | None = None,  # seconds to wait for a decision;
-                                        # None → server default (20.0)
-                                        # 0 → return immediately
-    bypass_scope: str | None = None,  # unchanged: "session" adds the matched
-                                      # rule pattern to the session bypass set
-)
-```
-
-`confirm_token` is **removed**. The level name `confirm` in security rules is unchanged — it now means "requires an Approval".
-
-Waiting semantics: the wait deadline is `min(approval_wait, time-to-expiry)`, where the 20 s default is only the **floor for clients without MCP progress support**. When the client's request carries a `progressToken`, each 2 s poll tick also emits `notifications/progress` — the client resets its request timeout, and the wait extends automatically up to the remaining approval TTL. The human gets the full 15 minutes to actually think; the agent experiences one long tool call. Clients that don't send a `progressToken` return after the 20 s floor and re-poll via `approval_id` — same row, both paths.
-
-### Execution flow (hybrid wait)
+Single orchestration path (existing `ssh_run` / execute-command logic):
 
 ```
-ssh_run(command, ...)
-  1. resolve node + auto-session            (unchanged)
-  2. CommandGuard.evaluate (session bypass)  (unchanged)
-  3. BLOCK  → ⛔ reject                      (unchanged, never bypassable)
-  4. CONFIRM
-       a. approval_id given?
-            • load row; mismatches of command/node → error
-            • rejected            → report rejection incl. `reject_reason`, stop
-            • expired / past TTL  → report expiry, suggest resubmit
-            • executed            → report "already used", stop (replay guard)
-            • approved            → atomic claim (see below) → execute
-            • pending             → fall through to wait loop
-       b. no approval_id → INSERT row (pending, expires_at = now + ttl)
-       c. wait loop: poll every 2 s up to min(approval_wait, time-to-expiry);
-            if ctx has a progressToken, each tick emits notifications/progress
-            and the deadline extends automatically to time-to-expiry
-            • approved → atomic claim → execute
-            • rejected → return immediately
-            • expiry passes → mark expired, return
-            • wait elapsed → return pending message with approval_id
-  5. WARN → log and continue                 (unchanged)
-  6. execute via session                     (unchanged)
-  7. write CommandLog (with audit fixes) + stamp approval.exec_exit_code
+decision = CommandGuard.evaluate(command, node)  # no bypass_patterns
+if decision.block → log denial; return "Error: denied by policy"
+if decision.allow → execute (log)
+if decision.review:
+  if not gate_enabled or no api key:
+    log denial (reason=disabled); return "Error: denied by policy"
+  try:
+    score = GatePort.is_safe(state=command+node_name, instructions=config)
+  except gate error / timeout:
+    log denial (reason=error); return "Error: denied by policy"
+  if score >= SAFE_THRESHOLD:
+    execute (log)
+  else:
+    log denial (score, reason=unsafe); return "Error: denied by policy"
 ```
 
-Pending message returned to the AI (must be self-explanatory). The command is shown on its own unquoted line and the recipe does **not** embed the command in quotes — the old flow had a latent bug where a command containing double quotes produced a broken re-call snippet. The AI is expected to re-send the command byte-for-byte:
+One agent-visible string only: `Error: denied by policy`. Retrying a denied command is harmless — every attempt re-runs the same path, and an operator-side rule change makes a later retry pass.
 
-```
-⏳ Approval required (id: <approval_id>)
-Command: <command>
-Node: <node>  Rule: <description>
-A human must approve this in the Shuttle web panel (Approvals page).
-To check the decision, re-call ssh_run with the SAME command byte-for-byte
-(do not reformat or re-quote) plus: approval_id="<approval_id>"
-```
+### Gate port
 
-Rejection message (includes the operator's reason so the agent can revise):
+- One method: given state + instructions → probability in `[0,1]` or error.
 
-```
-❌ Approval rejected (id: <approval_id>)
-Command: <command>
-Node: <node>  Rule: <description>
-Reason: <reject_reason, or "no reason given">
-Ask the operator for clarification, or revise the command and resubmit —
-a resubmission always creates a NEW approval_id.
-```
+- Implementation: `typesafe-sdk` (`uv add typesafe-sdk` — new dependency, replaces hand-rolled HTTP and parsing). Use `AsyncTypeSafeClient`, constructed once at startup and closed on shutdown. Point it at OpenRouter via `base_url` — the SDK appends `/v1/systemone`; OpenRouter proxies TypeSafe's Jev. TypeSafe direct also works (default base URL, model `jev-1.13.0`).
 
-### Atomic claim & replay prevention
+  ```python
+  client = AsyncTypeSafeClient(
+      api_key=config.openrouter_api_key,
+      base_url=config.gate_base_url,   # https://openrouter.ai/api
+      model=config.gate_model,
+      timeout=GATE_TIMEOUT,
+      retry=RetryPolicy(max_retries=0),  # fail fast on the command hot path
+  )
+  result = await client.system_one(
+      # attacker-controlled text goes in state, never in instructions
+      state={"command": command, "node": node_name},
+      questions={"is_safe": Noul(instructions=config.gate_safe_instructions)},
+  )
+  score = result.nouls["is_safe"].noul  # calibrated P(safe) in [0,1]
+  ```
 
-Claiming an approved approval flips it to `executed` **before** execution, guarded by a conditional update:
+- Pass `api_key`/`base_url` from `ShuttleConfig` explicitly; the SDK also reads `TYPESAFE_API_KEY`/`TYPESAFE_BASE_URL` env vars, but Shuttle config stays the single source under the `SHUTTLE_` prefix.
 
-```sql
-UPDATE pending_approvals
-SET status='executed', executed_at=:now
-WHERE id=:id AND status='approved' AND expires_at > :now  -- rowcount 1 = we own it; expires_at here, not pre-check: kills read→claim TOCTOU
-```
+- `gate_model` is config (code default: `typesafe/jev-1.13` — pin the versioned id, not the `~typesafe/jev-latest` alias, so a security gate does not silently move to a new release). Jev is a decision-only model (no text generation) returning calibrated probabilities (RLCD training), so `SAFE_THRESHOLD` is a calibrated bound, not a heuristic over self-reported text.
 
-- Two concurrent `ssh_run` calls with the same `approval_id`: exactly one wins the claim; the loser re-reads status and reports "already used".
-- If the execution itself fails, the approval stays `executed` (with `exec_exit_code` recorded): one decision = one execution *attempt*.
-- SQLite WAL + single-writer makes the claim race-free without extra locking.
+- **Injection caveat**: the command string is attacker-controlled input to the judge. Keep it inside `state`; the verdict criteria live in `instructions`. Jev cannot emit off-schema output or prose — there is no text channel to hijack — but an attacker can still craft commands that merely look safe; the calibrated probability is the only signal. Document this.
 
-### Panel claim (`bypass_scope="session"`)
+- Any SDK exception (`TypeSafeError` subclasses: transport, timeout, non-2xx), or malformed/missing answer → treat as not safe.
 
-When the claiming call passes `bypass_scope="session"`, the matched rule pattern is added to the session's bypass set at claim time (same semantics as today's token flow, re-anchored to approvals). The `bypass_scope` seen by the *initial* call is persisted in the `pending_approvals.bypass_scope` column, so the panel approval dialog can show the notice regardless of when and by whom the claim is later made.
+- `SAFE_THRESHOLD` and `GATE_TIMEOUT` are code constants (timeout on the order of ~2s — this sits on the command hot path; Jev's own latency is ~70–500ms). `SAFE_THRESHOLD` should be high (~0.9): measured scores are polarized (benign reads ≈0.99, destructive ≈0.01) but context-dependent commands like `usermod -aG sudo` land at 0.5–0.7 under permissive instructions — a 0.5 threshold would let privilege escalation through. With no quarantine, a false-positive deny is cheap (one refused command, logged), so erring high is fine. See `examples/try_jev_gate.py` for the measurement.
 
-### Web API
-
-All under the existing Bearer-token guard (`verify_token`):
-
-| Method | Path                            | Behavior                                                                                                                                       |
-| ------ | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/api/approvals?status=pending` | list; resolves node names; sweeps expired pending rows first                                                                                   |
-| GET    | `/api/approvals/{id}`           | detail (incl. `bypass_scope`, `reject_reason`)                                                                                                 |
-| POST   | `/api/approvals/{id}/approve`   | conditional update `pending→approved` (+`decided_at`); 409 if not claimable (already decided / expired)                                        |
-| POST   | `/api/approvals/{id}/reject`    | body `{reason?: string}` (optional, ≤ 2000 chars server-enforced); conditional update `pending→rejected` storing `reject_reason`; 409 likewise |
-
-Notes:
-
-- 404 vs 409 needs a read before the conditional update: unknown id → 404, known-but-not-pending → 409. A pure conditional UPDATE cannot distinguish the two.
-- `_batch_node_names` currently exists as a private copy in **both** `logs.py` and `sessions.py` — this effort extracts it into a shared routes helper instead of pasting a third copy.
-
-No background sweeper task in v1 — expiry is computed on read (list endpoint + guard flow). A periodic sweep can be added later if the table grows.
-
-### Panel UI
-
-New **Approvals** page (`web/src/pages/`):
-
-- Pending queue: command (monospace), node, matched rule, requested-at, live countdown to expiry, **Approve / Reject** buttons with a confirm dialog that displays the full command.
-- The reject dialog carries a **reason textarea** (optional but encouraged — placeholder explains it will be shown to the AI verbatim). Approving requires no reason.
-- History tab: recent decided/expired/executed rows with decided-at, exit code, and the reject reason where present.
-- TanStack Query with `refetchInterval` (~3 s) on the pending list.
-- Notice inside the dialog when `bypass_scope="session"` is set on the row.
+- No streaming, no multi-call rubric in v1, no session history in state.
 
 ### Config (`ShuttleConfig`)
 
-| Field           | Default                   | Meaning                                                                                                                          |
-| --------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `approval_ttl`  | `900`                     | seconds a pending approval stays decidable                                                                                       |
-| `approval_wait` | `20.0`                    | server-default synchronous wait — the floor for progress-less clients; progress-capable clients auto-extend to the remaining TTL |
-| (constant)      | `2.0`                     | poll interval inside the wait loop                                                                                               |
-| (validation)    | `0 ≤ approval_wait ≤ 300` | per-call values clamped to this range                                                                                            |
+- Add: `openrouter_api_key` (secret string, optional), `gate_enabled` (bool, default false), `gate_safe_instructions` (string, non-empty default in code — becomes the `is_safe` question's `instructions`), `gate_model` (string, code default `typesafe/jev-1.13`), `gate_base_url` (string, default `https://openrouter.ai/api`).
+- Remove: `approval_ttl`, `approval_wait`.
+- Env prefix remains `SHUTTLE_`.
 
-## Audit fixes (in scope, this effort)
+### Schema
 
-1. **stderr persisted** — `CommandLog.stderr` is currently hardcoded `None`; store truncated stderr (same 64 KB cap as stdout).
-1. **`bypassed` accuracy** — currently `bypassed=confirm_token is not None`, which flags any call that carried a token (even allow-level). New rule: `bypassed=True` iff the command matched a confirm/warn rule *and* was permitted via an approval claim or a session bypass pattern.
-1. **`CommandLog.approval_id`** — new nullable column (plain string, no FK) for traceability from log row to approval decision.
-1. **Remove dead logging placeholders** — `SessionManager._persist_session`, `_persist_session_close`, `_persist_command_log` are empty stubs. Delete them and the unused `db_session_factory` plumbing; document the invariant that `_execute_command_logic` is the single audit point for command execution.
-1. **Normalize the loguru call** — `logger.warning("Failed to persist command log for {cmd}", cmd=...)` → f-string, for consistency (kwargs form is valid loguru — cf. this file's WARN call); not a bug fix.
+- **CommandLog**: add `gate_score` (float, nullable) and `gate_reason` (string, nullable: `unsafe`|`error`|`disabled`); denied commands are logged, not only executed ones. Remove `approval_id` and `bypassed` — do not keep dead columns "for compatibility."
+- **Delete** `pending_approvals` model, repo, routes, schemas, UI, and tests. No migration of old rows; drop table.
+- SecurityRule.level check/validation: only `block`|`review`|`allow`.
+- Seeds: former confirm patterns → `review`; warn seeds deleted; block seeds unchanged.
+- No runtime mapping of legacy `confirm`/`warn` strings — data must be updated as part of the change (seed rewrite + document that existing DBs need level updates or re-seed). Prefer startup: reject/disable unknown levels rather than silent reinterpretation.
 
-## Security analysis
+### MCP / tools
 
-- **Self-approval eliminated**: the AI never receives a capability-bearing secret; it can only observe state and re-poll.
-- **Binding**: an approval authorizes exactly `(command, node_id)`; the claiming call must match both, byte-exact.
-- **Replay**: single-use via atomic claim; `executed` rows refuse re-claim.
-- **Block rules** remain unreachable by approvals (guard rejects before any approval logic).
-- **Panel auth dependency**: approvals API sits behind the existing optional Bearer guard. If `api_token` is unset, anyone with network access to the panel can approve. Documentation must call this out; real panel auth is a tracked follow-up, not in scope.
-- **TTL**: `expires_at` gates both deciding (panel) and claiming (executor); an approved-but-unconsumed approval dies with the same TTL.
+- `ssh_run`: drop `approval_id`, `approval_wait`, `bypass_scope` (and any residual confirm token).
+- Pending/rejection/approval helper messages deleted.
+- Prompts and tool descriptions updated; no teaching of panel approval.
 
-## Compatibility & migration
+### Web
 
-- New table via `create_all` — no hand-written migration. The `approval_id` column on `command_logs` and the status index go through the existing idempotent column-add / `CREATE INDEX IF NOT EXISTS` paths in `init_db`.
-- Breaking MCP change (`confirm_token` removed). Document in `docs/` tool references; version bump handled by the release process, not this effort.
-- Upstream-first: feature PRs target `enwaiax/shuttle` (per AGENTS.md).
+- Approvals API and panel page are deleted outright; no replacement surface is needed — gate denials are rows in the existing command-log view (show `gate_score`/`gate_reason` there).
+- Optional: a denied log row links to the Rules form pre-filled with the command, so a false positive becomes an explicit allow rule authored by a human.
+- Rules UI: level dropdown only block/review/allow.
 
-## Test plan
+### CommandGuard
 
-- **DB/repo**: create → pending defaults; conditional approve/reject (happy + 409 paths); reject stores `reject_reason`; claim race (two claims, one wins); claim refuses expired approved rows via the SQL predicate itself; expiry sweep.
-- **MCP flow**: confirm match creates approval; hybrid wait times out → pending message; approve → claim → executes; reject → error includes `reject_reason` (or the "no reason given" fallback); expired → clear error; wrong command / wrong node with `approval_id` → error; replay → "already used"; `bypass_scope="session"` persisted on the row and adds bypass at claim; block rules unaffected by any approval state.
-- **Web API**: list + sweep, approve/reject, reject with/without reason, reason > 2000 chars rejected (422/400), 404 vs 409 distinction, auth enforced when `api_token` set.
-- **Audit**: stderr persisted and truncated; `bypassed` true only on real bypass paths; `approval_id` stamped on CommandLog and `exec_exit_code` back-filled.
+- Remove `bypass_patterns` parameter and bypass skip logic.
+- Recognize only block/review/allow; unknown level in DB → skip invalid rule with log (consistent with invalid regex skip today).
 
-## Tickets
+### Docs
 
-| #   | Ticket                                                     | Blocked by |
-| --- | ---------------------------------------------------------- | ---------- |
-| 01  | `pending_approvals` model + ApprovalRepo                   | —          |
-| 02  | `ssh_run` approval flow (hybrid wait, claim, remove token) | 01         |
-| 03  | Audit fixes (stderr, bypassed, approval_id, stub removal)  | 02         |
-| 04  | Approvals web API                                          | 01         |
-| 05  | Approvals panel UI                                         | 04         |
-| 06  | Docs + prompts update                                      | 02, 04     |
-| 07  | End-to-end verification                                    | 02–06      |
+- Update security-rules docs, MCP setup, web panel docs, CONTEXT.md glossary (remove Approval Queue / Bypass; add review level and LLM Gate).
 
-## Open questions
+### Testing seams (agreed shape)
 
-1. Should the panel show a browser notification / sound on new pending approvals? (cheap UX win, defer to implementation)
-1. Default `approval_ttl` 15 min — long enough for a human to notice without notifications? Revisit after first real use.
+Primary seam: **command orchestration** (`ssh_run` / execute-command logic) with injected Gate port and DB.
+
+Secondary: CommandGuard unit tests; CommandLog gate-metadata repo tests.
+
+Do not test OpenRouter network or UI pixels.
+
+## Testing Decisions
+
+- Test **external behavior**: given command + rules + Gate port stub → executed result or exact error string, and the resulting CommandLog row.
+- Good tests do not assert internal helper names, SQL text, or HTTP payload cosmetics beyond the Gate port contract.
+- Cover at least:
+  - block → denied by policy, no gate call
+  - allow → executes
+  - review + score ≥ threshold → executes
+  - review + score < threshold → denied by policy, log row with score + `unsafe`
+  - review + gate error/timeout → denied by policy, log row `error`
+  - review + gate_enabled false / no key → denied by policy, log row `disabled`
+  - MCP tool signature rejects/removes old params (or simply does not accept them)
+  - Guard: review level matches; bypass parameter gone; warn/confirm not valid
+- Prior art: `tests/test_mcp/test_tools.py`, `test_execute_logic_more.py`, `tests/test_core/test_security.py`, `tests/test_web/test_approvals_api.py`, `tests/test_db/test_repository_approvals.py` — rewrite or replace these; do not keep approval claim tests alive.
+
+## Out of Scope
+
+- **Node quarantine / auto-freeze on unsafe verdicts** — the v2 candidate. Denials are already logged; an operator watching the log can disable the node or tighten rules. If v2 lands, `gate_reason` + score history is exactly the data a freeze policy would need.
+- Notification channels for gate denials.
+- Server-side execute-after-human-approve and return stdout to the agent. "Approving" a denied command means changing policy so a later agent retry passes — shuttle never pushes work back to the agent over MCP.
+- Panel action to add a block Security Rule from a log row (the allow-direction shortcut only pre-fills the Rules form — a human still authors the rule).
+- Multi-question judge rubrics, session-history state, per-node thresholds.
+- `shadow` / three-mode rollout flags (only `gate_enabled` bool).
+- Multi-user panel identity (`decided_by`).
+- Automatic re-seed of existing production DBs beyond what `init_db` already does for empty rule tables; operators with live DBs must update levels (document the break).
+- Replacing block regex rules with a model.
+- New ADR file can land in the same PR or follow immediately; not required before code passes tests.
+
+## Further Notes
+
+- This is intentionally a **breaking** MCP and schema change. Ship as such; no dual-stack.
+- Threat model: the MCP agent is untrusted after submission; the panel operator is trusted; the gate model is trusted-but-fail-closed when enabled. v1 contains the agent per-command (every review-level attempt denied + logged); automatic containment of a compromised agent's *other* commands is the deferred quarantine work.
+- Old tickets `issues/01`–`07` are deleted with this change; the new `issues/01`–`03` decompose the replacement work. Git history preserves the Approval Queue design if needed.
+- Feature slug kept as `approval-queue` so history and links remain; title and status reflect the replacement.

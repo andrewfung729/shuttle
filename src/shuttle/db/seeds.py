@@ -31,67 +31,42 @@ DEFAULT_SECURITY_RULES = [
         "description": "Fork bomb",
         "priority": 4,
     },
-    # Confirm
+    # Review (LLM gate when enabled; denied otherwise)
     {
         "pattern": r"sudo .*",
-        "level": "confirm",
+        "level": "review",
         "description": "Sudo commands",
         "priority": 10,
     },
     {
         "pattern": r"rm -rf ",
-        "level": "confirm",
+        "level": "review",
         "description": "Recursive force delete",
         "priority": 11,
     },
     {
         "pattern": r"chmod 777",
-        "level": "confirm",
+        "level": "review",
         "description": "World-writable permissions",
         "priority": 12,
     },
     {
         "pattern": r"shutdown",
-        "level": "confirm",
+        "level": "review",
         "description": "System shutdown",
         "priority": 13,
     },
     {
         "pattern": r"reboot",
-        "level": "confirm",
+        "level": "review",
         "description": "System reboot",
         "priority": 14,
     },
     {
         "pattern": r"kill -9",
-        "level": "confirm",
+        "level": "review",
         "description": "Force kill process",
         "priority": 15,
-    },
-    # Warn
-    {
-        "pattern": r"apt install",
-        "level": "warn",
-        "description": "APT package install",
-        "priority": 20,
-    },
-    {
-        "pattern": r"pip install",
-        "level": "warn",
-        "description": "Pip package install",
-        "priority": 21,
-    },
-    {
-        "pattern": r"npm install",
-        "level": "warn",
-        "description": "NPM package install",
-        "priority": 22,
-    },
-    {
-        "pattern": r"curl .* \| bash",
-        "level": "warn",
-        "description": "Piped remote script",
-        "priority": 23,
     },
 ]
 

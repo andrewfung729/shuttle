@@ -1,14 +1,11 @@
-"""Tests for CommandGuard."""
+"""Tests for CommandGuard and the three-level SecurityLevel model."""
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from shuttle.core.security import (
-    CommandGuard,
-    SecurityLevel,
-)
+from shuttle.core.security import CommandGuard, SecurityLevel
 from shuttle.db.models import Base, SecurityRule
 
 # ---------------------------------------------------------------------------
@@ -17,11 +14,11 @@ from shuttle.db.models import Base, SecurityRule
 
 
 def test_security_level_values():
-    """SecurityLevel must expose the four expected string values."""
+    """SecurityLevel must expose exactly block / review / allow."""
     assert SecurityLevel.BLOCK == "block"
-    assert SecurityLevel.CONFIRM == "confirm"
-    assert SecurityLevel.WARN == "warn"
+    assert SecurityLevel.REVIEW == "review"
     assert SecurityLevel.ALLOW == "allow"
+    assert {level.value for level in SecurityLevel} == {"block", "review", "allow"}
 
 
 # ---------------------------------------------------------------------------
@@ -59,16 +56,9 @@ async def _seed_sample_rules(session: AsyncSession) -> None:
         ),
         SecurityRule(
             pattern=r"\bsudo\b",
-            level="confirm",
+            level="review",
             priority=20,
-            description="Confirm sudo",
-            enabled=True,
-        ),
-        SecurityRule(
-            pattern=r"\bcurl\b",
-            level="warn",
-            priority=30,
-            description="Warn on curl",
+            description="Review sudo",
             enabled=True,
         ),
         SecurityRule(
@@ -99,24 +89,12 @@ async def test_evaluate_block(guard_db_session):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_confirm(guard_db_session):
-    """A command matching a CONFIRM rule must require confirmation."""
+async def test_evaluate_review(guard_db_session):
+    """A command matching a REVIEW rule must produce a review decision."""
     await _seed_sample_rules(guard_db_session)
     guard = CommandGuard()
     decision = await guard.evaluate("sudo apt-get update", "node1", guard_db_session)
-    assert decision.level == SecurityLevel.CONFIRM
-    assert decision.matched_rule is not None
-
-
-@pytest.mark.asyncio
-async def test_evaluate_warn(guard_db_session):
-    """A command matching a WARN rule must emit a warning."""
-    await _seed_sample_rules(guard_db_session)
-    guard = CommandGuard()
-    decision = await guard.evaluate(
-        "curl https://example.com", "node1", guard_db_session
-    )
-    assert decision.level == SecurityLevel.WARN
+    assert decision.level == SecurityLevel.REVIEW
     assert decision.matched_rule is not None
 
 
@@ -141,28 +119,17 @@ async def test_no_match_defaults_to_allow(guard_db_session):
 
 
 @pytest.mark.asyncio
-async def test_bypass_patterns_skip_confirm_but_not_block(guard_db_session):
-    """bypass_patterns can skip CONFIRM, but BLOCK is never bypassed."""
+async def test_evaluate_has_no_bypass_parameter(guard_db_session):
+    """The bypass-pattern path is gone: evaluate takes no bypass_patterns."""
+    import inspect
+
     await _seed_sample_rules(guard_db_session)
     guard = CommandGuard()
+    sig = inspect.signature(guard.evaluate)
+    assert "bypass_patterns" not in sig.parameters
 
-    # CONFIRM bypassed — should skip to default ALLOW
-    decision = await guard.evaluate(
-        "sudo apt-get update",
-        "node1",
-        guard_db_session,
-        bypass_patterns=[r"\bsudo\b"],
-    )
-    assert decision.level == SecurityLevel.ALLOW
-
-    # BLOCK NOT bypassed even when pattern listed
-    decision = await guard.evaluate(
-        "rm -rf /home",
-        "node1",
-        guard_db_session,
-        bypass_patterns=[r"rm\s+-rf\s+/"],
-    )
-    assert decision.level == SecurityLevel.BLOCK
+    decision = await guard.evaluate("sudo apt-get update", "node1", guard_db_session)
+    assert decision.level == SecurityLevel.REVIEW
 
 
 @pytest.mark.asyncio
@@ -202,13 +169,32 @@ async def test_invalid_regex_skipped(guard_db_session):
 
 
 @pytest.mark.asyncio
+async def test_unknown_level_rule_skipped(guard_db_session):
+    """A rule whose level is not block/review/allow is skipped (legacy rows
+    like confirm/warn must never be silently reinterpreted)."""
+    guard_db_session.add_all(
+        [
+            SecurityRule(
+                pattern=r"\bsudo\b", level="confirm", priority=1, enabled=True
+            ),
+            SecurityRule(pattern=r"curl", level="warn", priority=2, enabled=True),
+        ]
+    )
+    await guard_db_session.commit()
+
+    guard = CommandGuard()
+    decision = await guard.evaluate("sudo curl http://x", "node1", guard_db_session)
+    assert decision.level == SecurityLevel.ALLOW
+
+
+@pytest.mark.asyncio
 async def test_node_specific_overrides_global(guard_db_session):
     """A node-specific rule should override a global rule with the same pattern."""
     global_rule = SecurityRule(
         pattern=r"\bsudo\b",
-        level="confirm",
+        level="review",
         priority=10,
-        description="Global confirm sudo",
+        description="Global review sudo",
         enabled=True,
         node_id=None,
     )
@@ -228,18 +214,12 @@ async def test_node_specific_overrides_global(guard_db_session):
     assert decision.level == SecurityLevel.ALLOW
 
 
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_evaluate_skips_overlong_regex_pattern(guard_db_session):
     """Patterns longer than 500 chars are ignored (ReDoS guard)."""
     long_pat = "x" * 501
     guard_db_session.add(
-        SecurityRule(
-            pattern=long_pat,
-            level="block",
-            priority=1,
-            enabled=True,
-        )
+        SecurityRule(pattern=long_pat, level="block", priority=1, enabled=True)
     )
     await guard_db_session.commit()
     guard = CommandGuard()
@@ -254,7 +234,7 @@ async def test_evaluate_duplicate_pattern_prefers_node_specific(guard_db_session
         [
             SecurityRule(
                 pattern=r"^uniquepat\b",
-                level="warn",
+                level="review",
                 priority=5,
                 enabled=True,
                 node_id=None,

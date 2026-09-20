@@ -73,3 +73,27 @@ async def test_list_logs_filter_by_node(client, db_session):
     assert data["total"] == 1
     assert data["items"][0]["node_name"] == "node-a"
     assert data["items"][0]["command"] == "ls"
+
+
+@pytest.mark.asyncio
+async def test_list_logs_includes_gate_metadata(client, db_session):
+    """Denial rows surface gate_score/gate_reason for the audit view."""
+    node_repo = NodeRepo(db_session)
+    node = await node_repo.create(
+        name="gate-node", host="10.0.0.9", username="root", encrypted_credential="enc"
+    )
+    await LogRepo(db_session).create(
+        node_id=node.id,
+        command="sudo reboot",
+        exit_code=None,
+        security_level="review",
+        gate_score=0.11,
+        gate_reason="unsafe",
+    )
+
+    resp = await client.get("/api/logs")
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["gate_score"] == 0.11
+    assert item["gate_reason"] == "unsafe"
+    assert item["exit_code"] is None

@@ -25,7 +25,7 @@ ______________________________________________________________________
 
 When AI coding assistants need to operate remote servers (run tests on GPU machines, deploy to staging, check logs), they need a secure bridge. Shuttle provides:
 
-- **🔐 4-Level Command Security** — Block dangerous commands, require confirmation for risky ones, warn on installs, allow the rest
+- **🔐 3-Level Command Security + LLM Gate** — Block dangerous commands, auto-score risky ones with a decision model, allow the rest
 - **🔄 Connection Pooling** — Reuse SSH connections across commands, no repeated handshakes
 - **📦 Session Isolation** — Each AI conversation gets its own working directory context
 - **🌐 Web Audit Panel** — See every command the AI ran, per node, with full stdout/stderr
@@ -128,23 +128,24 @@ AI:  Training started. Epoch 1/10... (working directory preserved automatically)
 
 ## Security Rules
 
-Commands are evaluated against a 4-level security system:
+Commands are evaluated against a 3-level security system:
 
-| Level          | Behavior                     | Example                       |
-| -------------- | ---------------------------- | ----------------------------- |
-| 🔴 **block**   | Rejected immediately         | `rm -rf /`, `mkfs`, fork bomb |
-| 🟡 **confirm** | Requires user confirmation   | `sudo`, `rm -rf`, `shutdown`  |
-| 🟠 **warn**    | Executes with warning logged | `apt install`, `pip install`  |
-| 🟢 **allow**   | Executes normally            | Everything else               |
+| Level         | Behavior                                              | Example                       |
+| ------------- | ----------------------------------------------------- | ----------------------------- |
+| 🔴 **block**  | Denied immediately (never calls the gate)             | `rm -rf /`, `mkfs`, fork bomb |
+| 🟠 **review** | LLM gate: safe score executes, everything else denies | `sudo`, `rm -rf`, `shutdown`  |
+| 🟢 **allow**  | Executes normally                                     | Everything else               |
 
-Default rules are seeded on first startup. Customize via Web UI or directly in the database.
+Every denial returns the same fixed error to the agent — `Error: denied by policy` — and is logged for operators with the gate score and reason.
+
+Enable the gate with `SHUTTLE_GATE_ENABLED=true` and `SHUTTLE_OPENROUTER_API_KEY=...`; with the gate off, review-level commands deny (fail closed). Default rules are seeded on first startup. Customize via Web UI or directly in the database.
 
 ### Per-Node Overrides
 
 Different servers can have different rules:
 
 ```
-Global: sudo .* → confirm
+Global: sudo .* → review (LLM gate)
 GPU Server: sudo .* → allow (trusted environment)
 Prod Server: DROP TABLE → block (extra protection)
 ```

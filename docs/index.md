@@ -6,7 +6,7 @@ Shuttle lets AI assistants (Claude Code, Cursor, etc.) securely execute commands
 
 ## Features
 
-- **4-Level Command Security** --- Block dangerous commands, require confirmation for risky ones, warn on installs, allow the rest
+- **3-Level Command Security + LLM Gate** --- Block dangerous commands, auto-score risky ones with a decision model, allow the rest
 - **Connection Pooling** --- Reuse SSH connections across commands, no repeated handshakes
 - **Session Isolation** --- Each AI conversation gets its own working directory context
 - **Web Audit Panel** --- See every command the AI ran, per node, with full stdout/stderr
@@ -50,12 +50,12 @@ See [MCP Setup](mcp-setup.md) for detailed instructions for Claude Code, Cursor,
 
 AI assistants get these tools automatically:
 
-| Tool             | Description                                            |
-| ---------------- | ------------------------------------------------------ |
-| `ssh_run`        | Run a command on a remote node (sessions auto-managed) |
-| `ssh_upload`     | Upload a file via SFTP                                 |
-| `ssh_download`   | Download a file via SFTP                               |
-| `ssh_add_node`   | Add a new SSH node                                     |
+| Tool           | Description                                            |
+| -------------- | ------------------------------------------------------ |
+| `ssh_run`      | Run a command on a remote node (sessions auto-managed) |
+| `ssh_upload`   | Upload a file via SFTP                                 |
+| `ssh_download` | Download a file via SFTP                               |
+| `ssh_add_node` | Add a new SSH node                                     |
 
 AI assistants also get 6 read-only resources with live runtime state: nodes (`shuttle://nodes`), per-node detail, security rules, active sessions, pool status, and recent command logs. See the [MCP API Reference](api.md) for the full list.
 

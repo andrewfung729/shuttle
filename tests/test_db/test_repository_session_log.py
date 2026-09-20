@@ -43,7 +43,7 @@ async def test_rule_list_effective_merges_global_and_node_rules(db_session):
         encrypted_credential="e",
     )
     rrepo = RuleRepo(db_session)
-    await rrepo.create(pattern=r"^g\d$", level="warn", priority=1, node_id=None)
+    await rrepo.create(pattern=r"^g\d$", level="review", priority=1, node_id=None)
     await rrepo.create(pattern=r"^n\d$", level="block", priority=2, node_id=node.id)
     await rrepo.create(pattern=r"^g\d$", level="allow", priority=3, node_id=node.id)
     merged = await rrepo.list_effective(node.id)
@@ -144,3 +144,28 @@ async def test_cleanup_old_data_deletes_stale_rows(db_session):
     )
     assert counts["command_logs"] >= 1
     assert counts["sessions"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_log_repo_persists_gate_metadata(db_session):
+    """Gate score/reason round-trip through LogRepo (denial audit rows)."""
+    node_repo = NodeRepo(db_session)
+    node = await node_repo.create(
+        name="gate-node", host="5.5.5.5", username="u", encrypted_credential="e"
+    )
+    lrepo = LogRepo(db_session)
+    await lrepo.create(
+        node_id=node.id,
+        command="sudo reboot",
+        exit_code=None,
+        security_level="review",
+        security_rule_id="rule-1",
+        gate_score=0.23,
+        gate_reason="unsafe",
+    )
+    fetched = (await lrepo.list_by_node(node.id))[0]
+    assert fetched.gate_score == 0.23
+    assert fetched.gate_reason == "unsafe"
+    assert fetched.exit_code is None
+    assert fetched.security_level == "review"
+    assert fetched.security_rule_id == "rule-1"

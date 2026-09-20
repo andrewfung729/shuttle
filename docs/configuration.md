@@ -6,17 +6,24 @@ Shuttle is configured entirely through environment variables (prefixed `SHUTTLE_
 
 All fields in `ShuttleConfig` can be overridden with environment variables prefixed `SHUTTLE_`.
 
-| Variable                    | Type   | Default                                     | Description                                             |
-| --------------------------- | ------ | ------------------------------------------- | ------------------------------------------------------- |
-| `SHUTTLE_SHUTTLE_DIR`       | path   | `~/.shuttle`                                | Data directory for DB, credentials, PID file, and token |
-| `SHUTTLE_DB_URL`            | string | `sqlite+aiosqlite:///~/.shuttle/shuttle.db` | Async SQLAlchemy database URL                           |
-| `SHUTTLE_WEB_HOST`          | string | `127.0.0.1`                                 | Bind address for `shuttle serve`                        |
-| `SHUTTLE_WEB_PORT`          | int    | `9876`                                      | Bind port for `shuttle serve`                           |
-| `SHUTTLE_POOL_MAX_TOTAL`    | int    | `50`                                        | Maximum total SSH connections across all nodes          |
-| `SHUTTLE_POOL_MAX_PER_NODE` | int    | `5`                                         | Maximum SSH connections per individual node             |
-| `SHUTTLE_POOL_IDLE_TIMEOUT` | int    | `300`                                       | Seconds before an idle connection is evicted            |
-| `SHUTTLE_POOL_MAX_LIFETIME` | int    | `3600`                                      | Maximum lifetime of a connection in seconds             |
-| `SHUTTLE_POOL_QUEUE_SIZE`   | int    | `10`                                        | Size of the waiting queue when pool is full             |
+| Variable                         | Type   | Default                                     | Description                                             |
+| -------------------------------- | ------ | ------------------------------------------- | ------------------------------------------------------- |
+| `SHUTTLE_SHUTTLE_DIR`            | path   | `~/.shuttle`                                | Data directory for DB, credentials, PID file, and token |
+| `SHUTTLE_DB_URL`                 | string | `sqlite+aiosqlite:///~/.shuttle/shuttle.db` | Async SQLAlchemy database URL                           |
+| `SHUTTLE_WEB_HOST`               | string | `127.0.0.1`                                 | Bind address for `shuttle serve`                        |
+| `SHUTTLE_WEB_PORT`               | int    | `9876`                                      | Bind port for `shuttle serve`                           |
+| `SHUTTLE_POOL_MAX_TOTAL`         | int    | `50`                                        | Maximum total SSH connections across all nodes          |
+| `SHUTTLE_POOL_MAX_PER_NODE`      | int    | `5`                                         | Maximum SSH connections per individual node             |
+| `SHUTTLE_POOL_IDLE_TIMEOUT`      | int    | `300`                                       | Seconds before an idle connection is evicted            |
+| `SHUTTLE_POOL_MAX_LIFETIME`      | int    | `3600`                                      | Maximum lifetime of a connection in seconds             |
+| `SHUTTLE_POOL_QUEUE_SIZE`        | int    | `10`                                        | Size of the waiting queue when pool is full             |
+| `SHUTTLE_GATE_ENABLED`           | bool   | `false`                                     | Enable the LLM gate for review-level commands           |
+| `SHUTTLE_OPENROUTER_API_KEY`     | string | —                                           | API key for the gate endpoint                           |
+| `SHUTTLE_GATE_MODEL`             | string | `typesafe/jev-1.13`                         | Decision model used by the gate (version-pinned)        |
+| `SHUTTLE_GATE_BASE_URL`          | string | `https://openrouter.ai/api`                 | TypeSafe System One–compatible endpoint                 |
+| `SHUTTLE_GATE_SAFE_INSTRUCTIONS` | string | built-in ops policy                         | Judge instructions for the gate's `is_safe` question    |
+
+With the gate disabled or the key missing, review-level commands are denied (reason `disabled` in the command log) — local development behaves identically to a gated setup, minus gate calls. See [Security Rules](security-rules.md) for the gate model.
 
 ## Database URL Formats
 

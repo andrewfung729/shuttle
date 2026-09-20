@@ -77,7 +77,7 @@ Ensure `uvx shuttle-mcp --help` works, or run `uv tool install shuttle-mcp` and 
 
 ### Commands blocked unexpectedly
 
-**Symptom:** `ssh_run` returns "BLOCKED" for a command you expect to work.
+**Symptom:** `ssh_run` returns `Error: denied by policy` for a command you expect to work.
 
 **Solutions:**
 
@@ -86,33 +86,30 @@ Ensure `uvx shuttle-mcp --help` works, or run `uv tool install shuttle-mcp` and 
 1. Use the **Rule Tester** (Rules page → Test button) to see which rule matches
 1. Adjust or delete the overly broad rule
 
-### Approval queue flow
+### Every review-level command is denied
 
-**Symptom:** Command returns "⏳ Approval required" with an `approval_id`.
+**Symptom:** `sudo ...` and other review-level commands all return `Error: denied by policy`, and the Activity log shows reason `disabled`.
 
-This is expected for commands matching `confirm`-level rules (e.g., `sudo`, `rm -rf`). A human must approve (or reject) the command in the web panel's **Approvals** page. The AI should re-call `ssh_run` with the SAME command byte-for-byte plus the `approval_id`.
+This is the fail-closed default: the LLM gate is off. Enable it:
 
-### Approval expired before I could decide
+1. Set `SHUTTLE_OPENROUTER_API_KEY` (OpenRouter key, or point `SHUTTLE_GATE_BASE_URL` at any TypeSafe System One-compatible endpoint).
+1. Set `SHUTTLE_GATE_ENABLED=true` and restart `shuttle serve`.
+1. With the gate on but misconfigured (bad key, unreachable endpoint), denials log reason `error` instead.
 
-**Symptom:** Approval shows "expired" in the panel, or the AI reports an expiry error.
+### Gate denies a command I consider safe
 
-1. Approvals expire after `SHUTTLE_APPROVAL_TTL` seconds (default 15 minutes) — this is intentional: a stale "yes" is dangerous.
-1. Have the AI resubmit the command; a resubmission always creates a **new** `approval_id`.
-1. If decisions routinely time out, raise the TTL via the `SHUTTLE_APPROVAL_TTL` environment variable.
+**Symptom:** Activity log shows a review-level denial with reason `unsafe` and a low score.
 
-### AI says approval "already used"
+1. The calibrated threshold is deliberately strict (0.9). Check the logged score — borderline commands (privilege changes especially) sit at 0.5-0.7 by design.
+1. Use the **create allow rule** shortcut on the denied row to add an explicit allow rule for that command — a human-authored policy change, not a one-off unlock.
+1. Retrying the command later goes through the same path; a rule change makes it pass.
 
-**Symptom:** Re-calling `ssh_run` with an `approval_id` returns "already used (single-use)".
+### The AI keeps retrying a denied command
 
-1. Each approval executes exactly once — the AI already consumed it in a previous call.
-1. Check the **Approvals → History** tab: executed approvals show their exit code.
-1. If the command needs to run again, the AI must resubmit it without an `approval_id` to create a new approval.
+**Symptom:** The agent loops on `Error: denied by policy`.
 
-### Rejected with a reason the AI keeps ignoring
+The fixed string carries no actionable detail, so a confused agent may retry. Retrying is harmless (each attempt just logs another denial), but the fix is policy: adjust the rules so the command passes, or tell the agent to take a different approach.
 
-**Symptom:** The AI resubmits essentially the same command after a rejection.
-
-1. The rejection message includes the operator's reason verbatim — make the reason prescriptive ("use `systemctl restart nginx` instead of editing the unit file"), not just "unsafe".
 1. If a pattern should never run at all, add a **block** rule instead of rejecting repeatedly.
 
 ## Web Panel Issues

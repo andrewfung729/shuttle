@@ -117,7 +117,7 @@ def register_resources(
 
     @mcp.resource("shuttle://sessions")
     async def list_active_sessions() -> str:
-        """Currently active SSH sessions with working directory and bypass state."""
+        """Currently active SSH sessions with working directory."""
         active = session_mgr.list_active()
 
         items = []
@@ -127,7 +127,6 @@ def register_resources(
                     "session_id": s.session_id,
                     "node_id": s.node_id,
                     "working_directory": s.working_directory,
-                    "bypass_patterns": list(s.bypass_patterns),
                     "env_vars": s.env_vars,
                 }
             )
@@ -180,7 +179,6 @@ def register_resources(
                     "command": log.command,
                     "exit_code": log.exit_code,
                     "security_level": log.security_level,
-                    "bypassed": log.bypassed,
                     "duration_ms": log.duration_ms,
                     "executed_at": log.executed_at.isoformat()
                     if log.executed_at

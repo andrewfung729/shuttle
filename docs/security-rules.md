@@ -1,19 +1,46 @@
 # Security Rules
 
-Shuttle evaluates every command against a rule engine before execution. Rules use regex patterns and are organized into four severity levels. This guide covers how rules work, the built-in defaults, per-node overrides, and the confirmation bypass mechanism.
+Shuttle evaluates every command against a rule engine before execution. Rules use regex patterns and three security levels; review-level matches are scored by an LLM gate. This guide covers how rules work, the built-in defaults, per-node overrides, and the gate.
+
+> **Removed in v3 (breaking):** the human Approval Queue (`approval_id`, claim loop, panel Approvals page), session Bypass Patterns, and the `confirm`/`warn` levels are gone. The LLM gate replaces the human-approve path. Existing databases must update rule levels (`confirm` → `review`; `warn` rules delete) or re-seed — unknown levels are skipped at evaluation, never reinterpreted.
 
 ## Security Levels
 
-Every rule has one of four levels. When a command matches a rule, Shuttle takes the corresponding action:
+Every rule has one of three levels. When a command matches a rule, Shuttle takes the corresponding action:
 
-| Level       | Behavior                                                                              | When to use                                                                                |
-| ----------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| **block**   | Command is rejected immediately. Cannot be bypassed.                                  | Destructive, unrecoverable operations (wipe disk, fork bomb).                              |
-| **confirm** | Execution paused. A one-time token is returned that the AI must re-submit to proceed. | Privileged or risky operations that a human should approve (sudo, force delete, shutdown). |
-| **warn**    | Command executes, but the event is flagged in the audit log.                          | Operations worth noting but not blocking (package installs, config changes).               |
-| **allow**   | Command executes normally.                                                            | The default — any command that does not match a higher-level rule.                         |
+| Level      | Behavior                                                                              | When to use                                                                     |
+| ---------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| **block**  | Denied immediately. Never calls the gate.                                             | Destructive, unrecoverable operations (wipe disk, fork bomb).                   |
+| **review** | Scored by the LLM gate: executes when the calibrated safety score ≥ 0.9, else denied. | Privileged or risky operations where routine matches are fine but abuse is not. |
+| **allow**  | Executes normally.                                                                    | The default — any command that does not match a higher-level rule.              |
 
 Rules are evaluated in **priority order** (lowest number first). The first matching rule determines the outcome. If no rule matches, the command is allowed.
+
+Every denial — block rule, unsafe gate score, gate failure, or gate disabled — returns the same fixed string to the agent: `Error: denied by policy`. No scores, rule text, or retry instructions are exposed; the details live in the command log for operators.
+
+## The LLM Gate
+
+When a `review`-level rule matches:
+
+1. If the gate is disabled (`SHUTTLE_GATE_ENABLED=false`, the default) or no API key is set, the command is denied (reason `disabled`). This makes local development behave identically, minus gate calls.
+1. Otherwise the gate asks a decision model (default `typesafe/jev-1.13` via OpenRouter's System One API) a single `is_safe` question about the command and node name. The model sees only that — no session history, secrets, or rule corpus.
+1. A calibrated probability ≥ `SAFE_THRESHOLD` (code constant, 0.9) executes the command; anything below denies it (reason `unsafe`). Gate errors and timeouts deny too (reason `error`) — fail-open is impossible.
+
+Operators configure the gate with environment variables:
+
+| Variable                         | Default                     | Purpose                                       |
+| -------------------------------- | --------------------------- | --------------------------------------------- |
+| `SHUTTLE_GATE_ENABLED`           | `false`                     | Turn gate calls on/off without touching rules |
+| `SHUTTLE_OPENROUTER_API_KEY`     | —                           | API key for the gate endpoint                 |
+| `SHUTTLE_GATE_MODEL`             | `typesafe/jev-1.13`         | Decision model (version-pinned)               |
+| `SHUTTLE_GATE_BASE_URL`          | `https://openrouter.ai/api` | TypeSafe System One–compatible endpoint       |
+| `SHUTTLE_GATE_SAFE_INSTRUCTIONS` | built-in ops policy         | What the judge should treat as safe           |
+
+The threshold and timeout are code constants on purpose: security posture is not an ops dial.
+
+**Injection caveat:** the command string is attacker-controlled input to the judge. It travels in the request's `state`; the verdict criteria live in `instructions`. Jev is decision-only (calibrated probability, no text channel to hijack), but an attacker can still craft commands that merely look safe — the calibrated probability is the only signal, which is why the threshold stays high. See `examples/try_jev_gate.py` for a scored corpus.
+
+**Fixing a false positive:** a denied row in the Activity log offers a "create allow rule" shortcut that opens the Rules form pre-filled with the command. Approving a denied command always means changing policy so a later retry passes — Shuttle never executes a held command and returns its output to the agent.
 
 ## Regex Pattern Syntax
 
@@ -31,7 +58,7 @@ Rule patterns are Python-compatible regular expressions matched with `re.search(
 | `chmod 777`          | `chmod 777 /var/www`              | `chmod 755 /var/www`      |
 | `:\(\)\{.*:\|:&\};:` | Fork bomb pattern                 | Normal commands           |
 
-Patterns are capped at 500 characters to prevent ReDoS attacks. Invalid regex patterns are silently skipped.
+Patterns are capped at 500 characters to prevent ReDoS attacks. Invalid regex patterns are silently skipped, as are rules with unknown levels (e.g. legacy `confirm`/`warn` rows).
 
 ## Built-in Default Rules
 
@@ -46,7 +73,7 @@ These rules are seeded into the database on first startup (only if no rules exis
 | 3        | `dd if=.* of=/dev/`  | Raw disk write         |
 | 4        | `:\(\)\{.*:\|:&\};:` | Fork bomb              |
 
-### Confirm (priority 10--15)
+### Review (priority 10--15)
 
 | Priority | Pattern     | Description                |
 | -------- | ----------- | -------------------------- |
@@ -56,15 +83,6 @@ These rules are seeded into the database on first startup (only if no rules exis
 | 13       | `shutdown`  | System shutdown            |
 | 14       | `reboot`    | System reboot              |
 | 15       | `kill -9`   | Force kill process         |
-
-### Warn (priority 20--23)
-
-| Priority | Pattern           | Description         |
-| -------- | ----------------- | ------------------- |
-| 20       | `apt install`     | APT package install |
-| 21       | `pip install`     | Pip package install |
-| 22       | `npm install`     | NPM package install |
-| 23       | `curl .* \| bash` | Piped remote script |
 
 You can add, edit, disable, or delete these rules through the web panel or directly in the `security_rules` database table.
 
@@ -83,72 +101,38 @@ Rules can be **global** (apply to all nodes) or **node-specific** (apply to a si
 
 ```
 Global rules:
-  sudo .*  → confirm  (priority 10)
-  rm -rf   → confirm  (priority 11)
+  sudo .*  → review  (priority 10)
+  rm -rf   → review  (priority 11)
 
 GPU Server overrides:
-  sudo .*  → allow    (priority 10)   ← overrides global for this node
+  sudo .*  → allow   (priority 10)  ← overrides global for this node
 
 Prod Server overrides:
-  DROP TABLE → block  (priority 5)    ← adds new rule for this node
+  DROP TABLE → block (priority 5)   ← adds new rule for this node
 ```
 
 Result:
 
-- **GPU Server**: `sudo apt update` is allowed (node override). `rm -rf /tmp` still requires confirmation (global rule, no override).
-- **Prod Server**: `DROP TABLE users` is blocked (node-specific rule). `sudo service restart` requires confirmation (global rule).
-- **Other nodes**: Both `sudo` and `rm -rf` require confirmation (global rules only).
+- **GPU Server**: `sudo apt update` is allowed (node override). `rm -rf /tmp` still goes through the gate (global rule, no override).
+- **Prod Server**: `DROP TABLE users` is blocked (node-specific rule). `sudo service restart` goes through the gate (global rule).
+- **Other nodes**: Both `sudo` and `rm -rf` go through the gate (global rules only).
 
 ### Creating Node Overrides
 
-In the web panel, navigate to **Security Rules**, select a node, and add a rule with the same pattern but a different level. The `source_rule_id` field can optionally reference the global rule being overridden for traceability.
-
-## Approval Queue
-
-When a command matches a **confirm**-level rule, Shuttle does not execute it. Instead, it creates a durable **approval request** and returns a pending message to the AI:
-
-```
-⏳ Approval required (id: <approval_id>)
-Command: <command>
-Node: <node>  Rule: <description>
-A human must approve this in the Shuttle web panel (Approvals page).
-To check the decision, re-call ssh_run with the SAME command byte-for-byte
-(do not reformat or re-quote) plus: approval_id="<approval_id>"
-```
-
-The decision is made by a **human in the web panel** (Approvals page) — never by the AI. The AI can only observe the decision, so a compromised or confused assistant cannot approve its own commands.
-
-### The Approval Loop
-
-1. The AI calls `ssh_run` with a confirm-level command and receives the pending message above.
-1. A human opens the **Approvals** page in the web panel, reviews the full command, and clicks **Approve** (or **Reject**, optionally with a reason that is shown to the AI verbatim).
-1. The AI re-calls `ssh_run` with the **same command byte-for-byte** plus the `approval_id`.
-1. Shuttle claims the approval atomically (single-use) and executes.
-1. Block-level rules **cannot** be bypassed, even with an approved approval.
-
-While the AI's first call is still open, Shuttle **waits** for the decision: progress-capable MCP clients get heartbeats and the wait extends up to the approval TTL (default 15 minutes); simpler clients get a response after ~20 seconds and simply re-poll with the `approval_id`.
-
-### Approval Properties
-
-- **Durable**: stored in the database (`pending_approvals`), survives restarts and works across multiple server processes.
-- **Binding**: an approval authorizes exactly `(command, node_id)`, byte-exact. A different command or node with the same `approval_id` is an error.
-- **Single-use**: once claimed, the approval is marked `executed` and can never be reused — a replay returns "already used".
-- **TTL**: approvals expire after `SHUTTLE_APPROVAL_TTL` seconds (default 900). Expired approvals can be neither approved nor claimed.
-- **Rejection reasons**: when rejecting, the operator may supply a reason; it appears verbatim in the AI's rejection message so the agent knows how to revise.
-- **Session bypass**: if the AI passed `bypass_scope="session"` when claiming, the matched rule pattern is added to the session's bypass set — subsequent commands matching that pattern run without a new approval.
+In the web panel, navigate to **Rules**, select a node, and add a rule with the same pattern but a different level. The `source_rule_id` field can optionally reference the global rule being overridden for traceability.
 
 ## Best Practices
 
 1. **Start with the defaults.** The built-in rules cover the most common dangerous operations. Add rules as you discover patterns specific to your environment.
 
-1. **Use block sparingly.** Block rules cannot be bypassed. Reserve them for truly catastrophic commands (disk wipe, fork bomb). For most risky commands, confirm is a better choice.
+1. **Use block sparingly.** Block rules never reach the gate. Reserve them for truly catastrophic commands (disk wipe, fork bomb). For risky-but-routine commands, review is a better choice — the gate sorts routine from abuse.
 
-1. **Tighten prod, loosen dev.** Use per-node overrides to allow `sudo` on development servers while keeping it at confirm on production.
+1. **Tighten prod, loosen dev.** Use per-node overrides to allow `sudo` on development servers while keeping it at review on production.
 
 1. **Be specific with patterns.** `rm -rf /` (with anchor) is better than `rm` (too broad). Test your regex against expected commands before deploying.
 
-1. **Use priority to control ordering.** Lower numbers are evaluated first. Place block rules at low priorities (1--9), confirm rules in the middle (10--19), and warn rules higher (20+).
+1. **Use priority to control ordering.** Lower numbers are evaluated first. Place block rules at low priorities (1--9) and review rules in the middle (10--19).
 
-1. **Review the Activity log.** The web panel shows which rules were triggered and whether commands were bypassed. Use this data to tune your rules over time.
+1. **Watch the denied rows.** The Activity log shows every denial with the gate score and reason (`unsafe` / `error` / `disabled`). A flood of `disabled` means the gate is off; recurring `unsafe` false positives are your cue to add an allow rule via the shortcut.
 
 1. **Disable rather than delete.** Each rule has an `enabled` flag. Disable a rule to stop it from matching without losing the configuration.

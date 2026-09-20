@@ -27,7 +27,7 @@ def register_prompts(
 
         Evaluates the command against all active security rules and returns
         a detailed assessment — which rules match, what security level applies,
-        and whether confirmation will be needed.
+        and whether the command will run.
         """
         from shuttle.db.repository import RuleRepo
 
@@ -70,7 +70,7 @@ def register_prompts(
 
         lines = []
         highest_level = "ALLOW"
-        level_order = {"BLOCK": 3, "CONFIRM": 2, "WARN": 1, "ALLOW": 0}
+        level_order = {"BLOCK": 3, "REVIEW": 2, "ALLOW": 0}
         for r in matching:
             lines.append(
                 f"  • [{r.level}] pattern=`{r.pattern}` — {r.description or 'no description'}"
@@ -78,20 +78,15 @@ def register_prompts(
             if level_order.get(r.level, 0) > level_order.get(highest_level, 0):
                 highest_level = r.level
 
-        icon = {"BLOCK": "⛔", "CONFIRM": "⚠️", "WARN": "⚡"}.get(highest_level, "✅")
+        icon = {"BLOCK": "⛔", "REVIEW": "⚖️"}.get(highest_level, "✅")
 
         advice = {
-            "BLOCK": "This command will be rejected. Rephrase or use an alternative approach.",
-            "CONFIRM": (
-                "This command requires human approval. Call ssh_run() and it will wait "
-                "or return a pending message with an approval_id; a human decides in the "
-                "Shuttle web panel (Approvals page). If you get an approval_id, re-call "
-                "ssh_run() with the SAME command verbatim (byte-for-byte, no reformatting "
-                'or re-quoting) plus that approval_id. Keep bypass_scope="session" on '
-                "the re-call if you intended a session bypass. If the approval is "
-                "rejected, read the Reason: line before deciding how to revise."
+            "BLOCK": "This command will be denied. Rephrase or use an alternative approach.",
+            "REVIEW": (
+                "This command is gated: it executes only when the LLM gate scores "
+                "it safe. If it is denied you will see a fixed policy error — ask "
+                "the operator to adjust the Security Rules if it was a false positive."
             ),
-            "WARN": "This command is allowed but will be logged with a warning. Proceed if intended.",
         }.get(highest_level, "Proceed normally.")
 
         return (
@@ -128,8 +123,7 @@ def register_prompts(
 
         session_info = (
             f"  Session ID: {node_session.session_id}\n"
-            f"  Working directory: {node_session.working_directory}\n"
-            f"  Bypassed rules: {list(node_session.bypass_patterns) or 'none'}"
+            f"  Working directory: {node_session.working_directory}"
             if node_session
             else "  No active session (will be auto-created on first ssh_run)"
         )

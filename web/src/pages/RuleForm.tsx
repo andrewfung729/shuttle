@@ -8,16 +8,17 @@ interface RuleFormProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   rule?: RuleResponse | null;
+  prefill?: { pattern: string; level: string } | null;
 }
 
-const levels = ["block", "confirm", "warn", "allow"] as const;
+const levels = ["block", "review", "allow"] as const;
 
 const inputCls =
   "focus-ring w-full rounded-xl border border-[var(--border-default)] bg-[var(--bg-tertiary)] px-4 py-2.5 text-[13px] text-[var(--text-primary)] outline-none transition-all duration-200 placeholder:text-[var(--text-muted)] hover:border-[var(--border-strong)]";
 
 const labelCls = "mb-2 block text-[12px] font-medium text-[var(--text-secondary)]";
 
-export default function RuleForm({ open, onOpenChange, rule }: RuleFormProps) {
+export default function RuleForm({ open, onOpenChange, rule, prefill }: RuleFormProps) {
   const isEdit = !!rule;
   const [pattern, setPattern] = useState("");
   const [level, setLevel] = useState<string>("block");
@@ -33,12 +34,13 @@ export default function RuleForm({ open, onOpenChange, rule }: RuleFormProps) {
       setDescription(rule.description ?? "");
       setPriority(String(rule.priority));
     } else {
-      setPattern("");
-      setLevel("block");
+      setPattern(prefill?.pattern ?? "");
+      setLevel(prefill?.level ?? "block");
       setDescription("");
       setPriority("100");
     }
-  }, [rule]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rule, prefill, open]);
 
   function reset() {
     setPattern("");
@@ -46,7 +48,6 @@ export default function RuleForm({ open, onOpenChange, rule }: RuleFormProps) {
     setDescription("");
     setPriority("100");
   }
-
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const payload = {
@@ -103,7 +104,7 @@ export default function RuleForm({ open, onOpenChange, rule }: RuleFormProps) {
             </div>
             <div>
               <label className={labelCls}>Security Level</label>
-              <div className="grid grid-cols-4 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 {levels.map((l) => (
                   <button
                     key={l}
@@ -113,11 +114,9 @@ export default function RuleForm({ open, onOpenChange, rule }: RuleFormProps) {
                       level === l
                         ? l === "block"
                           ? "border-[var(--red)]/30 bg-[var(--red-subtle)] text-[var(--red)]"
-                          : l === "confirm"
+                          : l === "review"
                             ? "border-[var(--orange)]/30 bg-[var(--orange-subtle)] text-[var(--orange)]"
-                            : l === "warn"
-                              ? "border-[var(--yellow)]/30 bg-[var(--yellow-subtle)] text-[var(--yellow)]"
-                              : "border-[var(--green)]/30 bg-[var(--green-subtle)] text-[var(--green)]"
+                            : "border-[var(--green)]/30 bg-[var(--green-subtle)] text-[var(--green)]"
                         : "border-[var(--border-default)] bg-[var(--bg-tertiary)] text-[var(--text-quaternary)] hover:border-[var(--border-strong)]"
                     }`}
                   >

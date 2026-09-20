@@ -4,16 +4,13 @@ Shuttle exposes 4 MCP tools and 6 MCP resources. Tools are actions the AI calls;
 
 ## ssh_run
 
-Run a shell command on a remote SSH node. Sessions are managed automatically: working directory is preserved across calls to the same node. 4-level security checks are applied before execution.
+Run a shell command on a remote SSH node. Sessions are managed automatically: working directory is preserved across calls to the same node. Security checks are applied before execution.
 
-| Parameter       | Type   | Required | Default               | Description                                                                                                                 |
-| --------------- | ------ | -------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `command`       | string | yes      | —                     | Shell command to execute                                                                                                    |
-| `node`          | string | no       | —                     | Node name (auto-selected if only one node exists)                                                                           |
-| `timeout`       | float  | no       | 30.0                  | Command timeout in seconds                                                                                                  |
-| `approval_id`   | string | no       | —                     | Existing approval to check (from a pending response)                                                                        |
-| `approval_wait` | float  | no       | server default (20.0) | Seconds to wait synchronously for a decision; `0` returns immediately; progress-capable clients wait up to the approval TTL |
-| `bypass_scope`  | string | no       | —                     | Bypass scope for session commands                                                                                           |
+| Parameter | Type   | Required | Default | Description                                       |
+| --------- | ------ | -------- | ------- | ------------------------------------------------- |
+| `command` | string | yes      | —       | Shell command to execute                          |
+| `node`    | string | no       | —       | Node name (auto-selected if only one node exists) |
+| `timeout` | float  | no       | 30.0    | Command timeout in seconds                        |
 
 **Returns:** Command output (stdout), or an error/security message.
 
@@ -22,10 +19,11 @@ Run a shell command on a remote SSH node. Sessions are managed automatically: wo
 **Security flow:**
 
 1. Command is evaluated against security rules
-1. `block` → rejected immediately
-1. `confirm` → creates a durable approval and waits; the human decides in the web panel. The pending message includes an `approval_id` — re-call with the SAME command byte-for-byte plus that `approval_id` to pick up the decision (approved → executes; rejected → error with the operator's reason; expired/already-used → clear error)
-1. `warn` → executes with warning logged
-1. `allow` → executes normally
+1. `block` → denied immediately
+1. `review` → scored by the LLM gate when enabled: calibrated safe score ≥ threshold executes; below threshold, gate error, or gate disabled → denied
+1. `allow` (or no match) → executes normally
+
+Every denial returns the same fixed string: `Error: denied by policy`. There are no approval ids, retry recipes, or denial reasons for the agent — operators see the details in the web panel's command log.
 
 **Example:**
 
@@ -75,15 +73,15 @@ ______________________________________________________________________
 
 Add a new SSH node to the Shuttle configuration. The node is registered in the database and connection pool.
 
-| Parameter     | Type         | Required | Default | Description                                  |
-| ------------- | ------------ | -------- | ------- | -------------------------------------------- |
-| `name`        | string       | yes      | —       | Unique node name                             |
-| `host`        | string       | yes      | —       | Hostname or IP                               |
-| `port`        | int          | no       | 22      | SSH port                                     |
-| `username`         | string      | no       | ""      | SSH username                                 |
-| `private_key_path` | string      | yes      | —       | Path to a private key file on the Shuttle server; read locally so the key content never appears in the agent conversation |
-| `jump_host`        | string      | no       | —       | Name of an existing node to use as jump host |
-| `tags`             | list[string] | no      | —       | Tags for categorization                      |
+| Parameter          | Type         | Required | Default | Description                                                                                                               |
+| ------------------ | ------------ | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `name`             | string       | yes      | —       | Unique node name                                                                                                          |
+| `host`             | string       | yes      | —       | Hostname or IP                                                                                                            |
+| `port`             | int          | no       | 22      | SSH port                                                                                                                  |
+| `username`         | string       | no       | ""      | SSH username                                                                                                              |
+| `private_key_path` | string       | yes      | —       | Path to a private key file on the Shuttle server; read locally so the key content never appears in the agent conversation |
+| `jump_host`        | string       | no       | —       | Name of an existing node to use as jump host                                                                              |
+| `tags`             | list[string] | no       | —       | Tags for categorization                                                                                                   |
 
 Inline secrets (`password`, `private_key`) are not accepted — key auth only, read server-side from `private_key_path`. Credentials are encrypted at rest. Password nodes can be added via the CLI (`shuttle node add`) or web panel instead.
 
@@ -111,13 +109,13 @@ Detailed information for one node, including its connection pool state.
 
 All security rules governing command execution, grouped by level.
 
-**Returns:** JSON — `{"rules": [...], "total": N, "by_level": {"BLOCK": n, "CONFIRM": n, ...}}`, each rule with `id`, `pattern`, `level`, `description`, `priority`, `enabled`, `node_id`. Read this before running commands that might be blocked or need approval.
+**Returns:** JSON — `{"rules": [...], "total": N, "by_level": {"block": n, "review": n, ...}}`, each rule with `id`, `pattern`, `level`, `description`, `priority`, `enabled`, `node_id`. Read this before running commands that might be blocked or gated.
 
 ## shuttle://sessions
 
 Currently active SSH sessions.
 
-**Returns:** JSON — each session with `session_id`, `node_id`, `working_directory`, `bypass_patterns`, `env_vars`. Useful to check which node has an existing session (and its cwd) before calling `ssh_run`.
+**Returns:** JSON — each session with `session_id`, `node_id`, `working_directory`, `env_vars`. Useful to check which node has an existing session (and its cwd) before calling `ssh_run`.
 
 ## shuttle://pool-status
 
@@ -129,4 +127,4 @@ Connection pool health.
 
 Recent command execution history for a node (last 20 commands).
 
-**Returns:** JSON — each log with `command`, `exit_code`, `security_level`, `bypassed`, `duration_ms`, `executed_at`. Returns `{"error": "Node '...' not found"}` for unknown names.
+**Returns:** JSON — each log with `command`, `exit_code`, `security_level`, `gate_score`, `gate_reason`, `duration_ms`, `executed_at`. Denied commands appear here with `exit_code: null`. Returns `{"error": "Node '...' not found"}` for unknown names.

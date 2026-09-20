@@ -54,9 +54,6 @@ class SSHSession:
     working_directory:
         Current working directory on the remote host; updated after each
         ``execute()`` call.
-    bypass_patterns:
-        Set of security-rule pattern strings that are bypassed for this
-        session.
     status:
         ``ACTIVE`` until ``close()`` is called.
     env_vars:
@@ -66,7 +63,6 @@ class SSHSession:
     session_id: str
     node_id: str
     working_directory: str = "~"
-    bypass_patterns: set[str] = field(default_factory=set)
     status: SessionStatus = SessionStatus.ACTIVE
     env_vars: dict[str, str] = field(default_factory=dict)
 

@@ -60,7 +60,7 @@ class NodeTestResult(BaseModel):
 
 class RuleCreate(BaseModel):
     pattern: str = Field(..., min_length=1)
-    level: str = Field(..., pattern=r"^(block|confirm|warn|allow)$")
+    level: str = Field(..., pattern=r"^(block|review|allow)$")
     node_id: str | None = None
     description: str | None = None
     priority: int = 0
@@ -70,7 +70,7 @@ class RuleCreate(BaseModel):
 
 class RuleUpdate(BaseModel):
     pattern: str | None = None
-    level: str | None = Field(None, pattern=r"^(block|confirm|warn|allow)$")
+    level: str | None = Field(None, pattern=r"^(block|review|allow)$")
     node_id: str | None = None
     description: str | None = None
     priority: int | None = None
@@ -123,7 +123,9 @@ class CommandLogResponse(BaseModel):
     stdout: str | None
     stderr: str | None
     security_level: str | None
-    bypassed: bool
+    security_rule_id: str | None = None
+    gate_score: float | None = None
+    gate_reason: str | None = None
     duration_ms: int | None
     executed_at: datetime
 
@@ -135,30 +137,6 @@ class LogListResponse(BaseModel):
     total: int
     page: int
     page_size: int
-
-
-# ── Approvals ──────────────────────────────────────
-
-
-class ApprovalResponse(BaseModel):
-    id: str
-    command: str
-    node_id: str
-    node_name: str | None = None
-    session_id: str | None = None
-    rule_id: str | None = None
-    rule_description: str | None = None
-    bypass_scope: str | None = None
-    status: str
-    requested_at: datetime
-    expires_at: datetime
-    decided_at: datetime | None = None
-    decided_by: str | None = None
-    reject_reason: str | None = None
-    executed_at: datetime | None = None
-    exec_exit_code: int | None = None
-
-    model_config = {"from_attributes": True}
 
 
 # ── Settings ───────────────────────────────────────

@@ -44,3 +44,28 @@ def test_config_custom_values(monkeypatch, tmp_path):
     assert cfg.pool_idle_timeout == 600
     assert cfg.pool_max_lifetime == 7200
     assert cfg.pool_queue_size == 20
+
+
+def test_gate_defaults():
+    """Gate config defaults: disabled, no key, pinned model, OpenRouter URL."""
+    cfg = ShuttleConfig()
+    assert cfg.gate_enabled is False
+    assert cfg.openrouter_api_key is None
+    assert cfg.gate_model == "typesafe/jev-1.13"
+    assert cfg.gate_base_url == "https://openrouter.ai/api"
+    assert cfg.gate_safe_instructions.strip() != ""
+
+
+def test_gate_env_overrides(monkeypatch):
+    monkeypatch.setenv("SHUTTLE_GATE_ENABLED", "true")
+    monkeypatch.setenv("SHUTTLE_OPENROUTER_API_KEY", "sk-or-123")
+    monkeypatch.setenv("SHUTTLE_GATE_MODEL", "jev-1.13.0")
+    monkeypatch.setenv("SHUTTLE_GATE_BASE_URL", "https://api.typesafe.ai")
+    monkeypatch.setenv("SHUTTLE_GATE_SAFE_INSTRUCTIONS", "custom instructions")
+
+    cfg = ShuttleConfig()
+    assert cfg.gate_enabled is True
+    assert cfg.openrouter_api_key == "sk-or-123"
+    assert cfg.gate_model == "jev-1.13.0"
+    assert cfg.gate_base_url == "https://api.typesafe.ai"
+    assert cfg.gate_safe_instructions == "custom instructions"
