@@ -12,25 +12,25 @@ Confirm-level commands still require a human in the web panel for every match. C
 
 Replace human-in-the-loop Approvals with a short gate:
 
-1. Security Rules only use three Security Levels: `block`, `review`, `allow`.
-1. `block` denies immediately. `allow` runs. `review` is scored by a decision model via OpenRouter's System One API (default model `typesafe/jev-1.13`; any TypeSafe System One–compatible endpoint works): a single `is_safe` boolean question returning a calibrated probability.
+1. Security Rules only use two levels: `block`, `allow`. Unmatched commands take the `gate` disposition (not a rule level).
+1. `block` denies immediately. `allow` runs only on an explicit allow-rule match. Unmatched commands are scored by a decision model via OpenRouter's System One API (default model `typesafe/jev-1.13`; any TypeSafe System One–compatible endpoint works): a single `is_safe` boolean question returning a calibrated probability (fail closed).
 1. `p ≥ SAFE_THRESHOLD` → execute. Below threshold → deny that command and log it. Gate errors, timeouts, disabled gate, or missing key → same: deny the command, log the reason. Denial is always command-local — nothing else changes state.
 1. The agent receives one fixed error string — `Error: denied by policy` — for every denial path. No scores, rule text, or retry instructions.
 1. Delete the Approval Queue protocol end-to-end (`approval_id`, hybrid wait, claim, bypass, warn, Approvals API/UI, `pending_approvals`). No backward compatibility.
 
-Operators configure `openrouter_api_key`, `gate_enabled`, and `gate_safe_instructions`. With gate off or no key, `review` denies the command (so local dev without a key behaves identically, minus gate calls).
+Operators configure `openrouter_api_key`, `gate_enabled`, and `gate_safe_instructions`. With gate off or no key, unmatched commands are denied (so local dev without a key behaves identically, minus gate calls).
 
-There is deliberately **no automatic node freeze** in v1: a compromised agent's review-level commands are each denied and logged; the operator sees the denials and can disable the node or tighten rules manually. Auto-quarantine is a documented v2 candidate.
+There is deliberately **no automatic node freeze** in v1: a compromised agent's unmatched commands are each denied and logged; the operator sees the denials and can disable the node or tighten rules manually. Auto-quarantine is a documented v2 candidate.
 
 ## User Stories
 
-1. As an operator, I want routine review-level commands auto-allowed when the gate scores them safe, so that I am not paged for every `sudo` match.
-1. As an operator, I want clearly unsafe review-level commands denied without my being online at that second, so that a runaway agent cannot execute them.
+1. As an operator, I want routine gated commands auto-allowed when the gate scores them safe, so that I am not paged for every `sudo` match.
+1. As an operator, I want clearly unsafe gated commands denied without my being online at that second, so that a runaway agent cannot execute them.
 1. As an operator, I want every denial recorded in the command log with command, Node, matched rule id/description snapshot, gate score (if any), reason (`unsafe` / `error` / `disabled`), and timestamp, so that audits and rule tuning have the data they need.
 1. As an operator, I want a denied log row to offer a "create allow rule" shortcut that opens the Rules form pre-filled with the command, so that fixing a false positive is one explicit policy change — never an execute-and-return-output back to the agent.
 1. As an operator, I want block-level Security Rules to hard-deny without calling the gate, so that known-destructive patterns never depend on a model or network.
 1. As an operator, I want allow-level commands to skip the gate, so that cheap read-only work stays fast and cheap.
-1. As an operator, I want existing confirm-level seed rules migrated to review, so that privileged patterns still enter the LLM gate.
+1. As an operator, I want legacy confirm/review seed rules removed or left to skip, so that privileged patterns still enter the LLM gate.
 1. As an operator, I want warn-level rules removed, so that unused severity does not clutter policy.
 1. As an operator, I want session Bypass Patterns removed, so that no trusted-session hole undermines the gate.
 1. As an agent (MCP client), I want `ssh_run` to simply run or return a fixed denial, so that I do not implement approval polling.
@@ -38,18 +38,18 @@ There is deliberately **no automatic node freeze** in v1: a compromised agent's 
 1. As an agent, I want no `approval_id`, `approval_wait`, `confirm_token`, or `bypass_scope` parameters, so that the tool surface stays small.
 1. As an operator, I want `SHUTTLE_OPENROUTER_API_KEY` (or equivalent settings field) to enable gate calls, so that credentials live in config not code.
 1. As an operator, I want `SHUTTLE_GATE_ENABLED` to turn the gate on or off, so that I can disable model calls without deleting rules.
-1. As an operator, when the gate is disabled or the API key is missing, I want review matches to deny the command, so that developer laptops without OpenRouter access still fail closed.
+1. As an operator, when the gate is disabled or the API key is missing, I want unmatched commands to deny when the gate is off, so that developer laptops without OpenRouter access still fail closed.
 1. As an operator, I want `SHUTTLE_GATE_SAFE_INSTRUCTIONS` to override the judge instructions text, so that I can tune what "safe" means without a code change.
 1. As an operator, I want the safe-score threshold to be a code constant, so that security posture is not an ops freestyle dial.
 1. As an operator, I want gate timeouts and transport errors to deny the command under enforce, so that fail-open is impossible when the gate is on.
 1. As an operator, I want CommandLog rows for denied and executed commands to remain the system of record, so that no parallel audit store is needed.
-1. As an operator, I want the Security Rules UI to offer only block/review/allow, so that policy language matches the new model.
+1. As an operator, I want the Security Rules UI to offer only block/allow, so that policy language matches the new model.
 1. As a deployer, I want a breaking release with no compatibility shims for old approval rows, MCP params, or `confirm`/`warn` level strings in code paths, so that the old protocol cannot linger.
-1. As a deployer, I want seed data and docs updated in the same change, so that a fresh install only knows block/review/allow.
+1. As a deployer, I want seed data and docs updated in the same change, so that a fresh install only knows block/allow.
 1. As a security reviewer, I want the judge model to see only command text plus Node name in state (no session history, secrets, or full rule corpus), so that the model input stays minimal.
 1. As a security reviewer, I want the agent to never observe gate probabilities, so that scores cannot be used as a search signal.
 1. As a developer, I want the gate client injected behind a narrow port, so that tests never call the real endpoint.
-1. As a developer, I want unit/integration tests at the `ssh_run` orchestration seam covering the block/review/allow/deny matrix, so that regressions in the gate are caught without UI tests.
+1. As a developer, I want unit/integration tests at the `ssh_run` orchestration seam covering the block/allow/deny matrix, so that regressions in the gate are caught without UI tests.
 1. As an agent author reading prompts/docs, I want MCP prompts and tool descriptions to stop teaching approval polling, so that agents do not look for a dead protocol.
 1. As a maintainer, I want CONTEXT.md and security docs to replace Approval / Bypass vocabulary with review level and LLM Gate, so that agents working in-repo use the new language.
 
@@ -57,10 +57,10 @@ There is deliberately **no automatic node freeze** in v1: a compromised agent's 
 
 ### Domain model (glossary impact)
 
-- **Security Level** values become: `block`, `review`, `allow` only. Remove `confirm` and `warn` from the enum, seeds, API validation, and UI.
+- **Security Level** values become: `block`, `allow` only; unmatched → gate. Remove `confirm` and `warn` from the enum, seeds, API validation, and UI.
 - **Approval** and **Approval Queue** are removed as live domain concepts. Historical ADR-0001 remains as history; this feature supersedes its runtime behavior. A follow-up ADR should record the replacement (not blocking for implementation).
 - **Bypass Pattern** is removed.
-- **LLM Gate**: the review-level branch that calls the gate and maps the calibrated score to execute or deny.
+- **LLM Gate**: the unmatched branch that calls the gate and maps the calibrated score to execute or deny.
 - There is no Hold Event or Node Quarantine concept in v1 — gate denials are ordinary command-log rows.
 
 ### Command path
@@ -71,7 +71,7 @@ Single orchestration path (existing `ssh_run` / execute-command logic):
 decision = CommandGuard.evaluate(command, node)  # no bypass_patterns
 if decision.block → log denial; return "Error: denied by policy"
 if decision.allow → execute (log)
-if decision.review:
+if decision.gate:
   if not gate_enabled or no api key:
     log denial (reason=disabled); return "Error: denied by policy"
   try:
@@ -130,8 +130,8 @@ One agent-visible string only: `Error: denied by policy`. Retrying a denied comm
 
 - **CommandLog**: add `gate_score` (float, nullable) and `gate_reason` (string, nullable: `unsafe`|`error`|`disabled`); denied commands are logged, not only executed ones. Remove `approval_id` and `bypassed` — do not keep dead columns "for compatibility."
 - **Delete** `pending_approvals` model, repo, routes, schemas, UI, and tests. No migration of old rows; drop table.
-- SecurityRule.level check/validation: only `block`|`review`|`allow`.
-- Seeds: former confirm patterns → `review`; warn seeds deleted; block seeds unchanged.
+- SecurityRule.level check/validation: only `block`|`allow`.
+- Seeds: block seeds for catastrophe; allow seeds optional; unmatched is gated.
 - No runtime mapping of legacy `confirm`/`warn` strings — data must be updated as part of the change (seed rewrite + document that existing DBs need level updates or re-seed). Prefer startup: reject/disable unknown levels rather than silent reinterpretation.
 
 ### MCP / tools
@@ -144,16 +144,16 @@ One agent-visible string only: `Error: denied by policy`. Retrying a denied comm
 
 - Approvals API and panel page are deleted outright; no replacement surface is needed — gate denials are rows in the existing command-log view (show `gate_score`/`gate_reason` there).
 - Optional: a denied log row links to the Rules form pre-filled with the command, so a false positive becomes an explicit allow rule authored by a human.
-- Rules UI: level dropdown only block/review/allow.
+- Rules UI: level dropdown only block/allow.
 
 ### CommandGuard
 
 - Remove `bypass_patterns` parameter and bypass skip logic.
-- Recognize only block/review/allow; unknown level in DB → skip invalid rule with log (consistent with invalid regex skip today).
+- Recognize only block/allow; unknown level in DB → skip invalid rule with log (consistent with invalid regex skip today).
 
 ### Docs
 
-- Update security-rules docs, MCP setup, web panel docs, CONTEXT.md glossary (remove Approval Queue / Bypass; add review level and LLM Gate).
+- Update security-rules docs, MCP setup, web panel docs, CONTEXT.md glossary (remove Approval Queue / Bypass; add gate disposition and LLM Gate).
 
 ### Testing seams (agreed shape)
 
@@ -170,12 +170,12 @@ Do not test OpenRouter network or UI pixels.
 - Cover at least:
   - block → denied by policy, no gate call
   - allow → executes
-  - review + score ≥ threshold → executes
-  - review + score < threshold → denied by policy, log row with score + `unsafe`
-  - review + gate error/timeout → denied by policy, log row `error`
-  - review + gate_enabled false / no key → denied by policy, log row `disabled`
+  - gate + score ≥ threshold → executes
+  - gate + score < threshold → denied by policy, log row with score + `unsafe`
+  - gate + gate error/timeout → denied by policy, log row `error`
+  - gate + gate_enabled false / no key → denied by policy, log row `disabled`
   - MCP tool signature rejects/removes old params (or simply does not accept them)
-  - Guard: review level matches; bypass parameter gone; warn/confirm not valid
+  - Guard: block/allow only; unmatched → gate; bypass gone; review/warn/confirm not valid
 - Prior art: `tests/test_mcp/test_tools.py`, `test_execute_logic_more.py`, `tests/test_core/test_security.py`, `tests/test_web/test_approvals_api.py`, `tests/test_db/test_repository_approvals.py` — rewrite or replace these; do not keep approval claim tests alive.
 
 ## Out of Scope
@@ -194,6 +194,6 @@ Do not test OpenRouter network or UI pixels.
 ## Further Notes
 
 - This is intentionally a **breaking** MCP and schema change. Ship as such; no dual-stack.
-- Threat model: the MCP agent is untrusted after submission; the panel operator is trusted; the gate model is trusted-but-fail-closed when enabled. v1 contains the agent per-command (every review-level attempt denied + logged); automatic containment of a compromised agent's *other* commands is the deferred quarantine work.
+- Threat model: the MCP agent is untrusted after submission; the panel operator is trusted; the gate model is trusted-but-fail-closed when enabled. v1 contains the agent per-command (every gated attempt denied + logged); automatic containment of a compromised agent's *other* commands is the deferred quarantine work.
 - Old tickets `issues/01`–`07` are deleted with this change; the new `issues/01`–`03` decompose the replacement work. Git history preserves the Approval Queue design if needed.
 - Feature slug kept as `approval-queue` so history and links remain; title and status reflect the replacement.

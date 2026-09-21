@@ -160,7 +160,7 @@ class CommandLog(Base):
     stderr: Mapped[str | None] = mapped_column(Text, nullable=True)
     security_level: Mapped[str | None] = mapped_column(String(50), nullable=True)
     security_rule_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    # LLM-gate audit metadata: score for review-level decisions (denials and
+    # LLM-gate audit metadata: score for gated decisions (denials and
     # passes), reason is one of unsafe | error | disabled for denials.
     gate_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     gate_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)

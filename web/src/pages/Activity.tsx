@@ -95,7 +95,7 @@ function formatLogAsText(log: CommandLogResponse): string {
 }
 
 type TimeRange = "today" | "7d" | "30d" | "all";
-type LevelFilter = "all" | "block" | "review" | "denied";
+type LevelFilter = "all" | "block" | "gate" | "denied";
 
 function computeSince(range: TimeRange): string | undefined {
   if (range === "all") return undefined;
@@ -182,7 +182,8 @@ function Entry({ log }: { log: CommandLogResponse }) {
             className={clsx(
               "mx-2 shrink-0 rounded-full px-2.5 py-[2px] text-[10px] font-semibold uppercase",
               sec === "block" && "bg-[var(--red-subtle)] text-[var(--red)]",
-              sec === "review" && "bg-[var(--orange-subtle)] text-[var(--orange)]",
+              (sec === "gate" || sec === "review") &&
+                "bg-[var(--orange-subtle)] text-[var(--orange)]",
             )}
           >
             {sec}
@@ -436,6 +437,11 @@ export default function Activity() {
     }
     if (levelFilter === "denied") {
       result = result.filter((i) => isDenied(i));
+    } else if (levelFilter === "gate") {
+      // include legacy "review" log rows from pre-gate-default era
+      result = result.filter(
+        (i) => i.security_level === "gate" || i.security_level === "review",
+      );
     } else if (levelFilter !== "all") {
       result = result.filter((i) => i.security_level === levelFilter);
     }
@@ -470,7 +476,7 @@ export default function Activity() {
     { label: "All", value: "all" },
     { label: "Denied", value: "denied" },
     { label: "Block", value: "block" },
-    { label: "Review", value: "review" },
+    { label: "Gate", value: "gate" },
   ];
 
   if (!nodeId) {
@@ -629,7 +635,7 @@ export default function Activity() {
                   levelFilter === l.value
                     ? l.value === "block" || l.value === "denied"
                       ? "bg-[var(--red-subtle)] text-[var(--red)]"
-                      : l.value === "review"
+                      : l.value === "gate"
                         ? "bg-[var(--orange-subtle)] text-[var(--orange)]"
                         : "bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-sm"
                     : "text-[var(--text-quaternary)] hover:text-[var(--text-tertiary)]",

@@ -86,7 +86,7 @@ async def test_list_logs_includes_gate_metadata(client, db_session):
         node_id=node.id,
         command="sudo reboot",
         exit_code=None,
-        security_level="review",
+        security_level="gate",
         gate_score=0.11,
         gate_reason="unsafe",
     )

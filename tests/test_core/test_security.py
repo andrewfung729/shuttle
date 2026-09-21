@@ -1,11 +1,11 @@
-"""Tests for CommandGuard and the three-level SecurityLevel model."""
+"""Tests for CommandGuard: block/allow rules, default gate disposition."""
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from shuttle.core.security import CommandGuard, SecurityLevel
+from shuttle.core.security import RULE_LEVELS, CommandGuard, SecurityLevel
 from shuttle.db.models import Base, SecurityRule
 
 # ---------------------------------------------------------------------------
@@ -14,11 +14,12 @@ from shuttle.db.models import Base, SecurityRule
 
 
 def test_security_level_values():
-    """SecurityLevel must expose exactly block / review / allow."""
+    """Disposition enum: block / allow rules + gate default."""
     assert SecurityLevel.BLOCK == "block"
-    assert SecurityLevel.REVIEW == "review"
     assert SecurityLevel.ALLOW == "allow"
-    assert {level.value for level in SecurityLevel} == {"block", "review", "allow"}
+    assert SecurityLevel.GATE == "gate"
+    assert {level.value for level in SecurityLevel} == {"block", "allow", "gate"}
+    assert RULE_LEVELS == frozenset({SecurityLevel.BLOCK, SecurityLevel.ALLOW})
 
 
 # ---------------------------------------------------------------------------
@@ -55,13 +56,6 @@ async def _seed_sample_rules(session: AsyncSession) -> None:
             enabled=True,
         ),
         SecurityRule(
-            pattern=r"\bsudo\b",
-            level="review",
-            priority=20,
-            description="Review sudo",
-            enabled=True,
-        ),
-        SecurityRule(
             pattern=r"^ls\b",
             level="allow",
             priority=40,
@@ -89,16 +83,6 @@ async def test_evaluate_block(guard_db_session):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_review(guard_db_session):
-    """A command matching a REVIEW rule must produce a review decision."""
-    await _seed_sample_rules(guard_db_session)
-    guard = CommandGuard()
-    decision = await guard.evaluate("sudo apt-get update", "node1", guard_db_session)
-    assert decision.level == SecurityLevel.REVIEW
-    assert decision.matched_rule is not None
-
-
-@pytest.mark.asyncio
 async def test_evaluate_allow(guard_db_session):
     """A command matching an ALLOW rule must be allowed."""
     await _seed_sample_rules(guard_db_session)
@@ -109,12 +93,12 @@ async def test_evaluate_allow(guard_db_session):
 
 
 @pytest.mark.asyncio
-async def test_no_match_defaults_to_allow(guard_db_session):
-    """A command that matches no rule must default to ALLOW."""
+async def test_no_match_defaults_to_gate(guard_db_session):
+    """A command that matches no rule must default to GATE (fail closed)."""
     await _seed_sample_rules(guard_db_session)
     guard = CommandGuard()
     decision = await guard.evaluate("echo hello", "node1", guard_db_session)
-    assert decision.level == SecurityLevel.ALLOW
+    assert decision.level == SecurityLevel.GATE
     assert decision.matched_rule is None
 
 
@@ -129,7 +113,7 @@ async def test_evaluate_has_no_bypass_parameter(guard_db_session):
     assert "bypass_patterns" not in sig.parameters
 
     decision = await guard.evaluate("sudo apt-get update", "node1", guard_db_session)
-    assert decision.level == SecurityLevel.REVIEW
+    assert decision.level == SecurityLevel.GATE
 
 
 @pytest.mark.asyncio
@@ -147,7 +131,7 @@ async def test_disabled_rule_ignored(guard_db_session):
 
     guard = CommandGuard()
     decision = await guard.evaluate("echo hello", "node1", guard_db_session)
-    assert decision.level == SecurityLevel.ALLOW
+    assert decision.level == SecurityLevel.GATE
 
 
 @pytest.mark.asyncio
@@ -165,26 +149,28 @@ async def test_invalid_regex_skipped(guard_db_session):
 
     guard = CommandGuard()
     decision = await guard.evaluate("anything", "node1", guard_db_session)
-    assert decision.level == SecurityLevel.ALLOW
+    assert decision.level == SecurityLevel.GATE
 
 
 @pytest.mark.asyncio
 async def test_unknown_level_rule_skipped(guard_db_session):
-    """A rule whose level is not block/review/allow is skipped (legacy rows
-    like confirm/warn must never be silently reinterpreted)."""
+    """Legacy rule levels (review/confirm/warn) are skipped, never reinterpreted."""
     guard_db_session.add_all(
         [
             SecurityRule(
-                pattern=r"\bsudo\b", level="confirm", priority=1, enabled=True
+                pattern=r"\bsudo\b", level="review", priority=1, enabled=True
             ),
-            SecurityRule(pattern=r"curl", level="warn", priority=2, enabled=True),
+            SecurityRule(
+                pattern=r"\bsudo\b", level="confirm", priority=2, enabled=True
+            ),
+            SecurityRule(pattern=r"curl", level="warn", priority=3, enabled=True),
         ]
     )
     await guard_db_session.commit()
 
     guard = CommandGuard()
     decision = await guard.evaluate("sudo curl http://x", "node1", guard_db_session)
-    assert decision.level == SecurityLevel.ALLOW
+    assert decision.level == SecurityLevel.GATE
 
 
 @pytest.mark.asyncio
@@ -192,9 +178,9 @@ async def test_node_specific_overrides_global(guard_db_session):
     """A node-specific rule should override a global rule with the same pattern."""
     global_rule = SecurityRule(
         pattern=r"\bsudo\b",
-        level="review",
+        level="block",
         priority=10,
-        description="Global review sudo",
+        description="Global block sudo",
         enabled=True,
         node_id=None,
     )
@@ -224,7 +210,7 @@ async def test_evaluate_skips_overlong_regex_pattern(guard_db_session):
     await guard_db_session.commit()
     guard = CommandGuard()
     decision = await guard.evaluate("xxx", "node1", guard_db_session)
-    assert decision.level == SecurityLevel.ALLOW
+    assert decision.level == SecurityLevel.GATE
 
 
 @pytest.mark.asyncio
@@ -234,7 +220,7 @@ async def test_evaluate_duplicate_pattern_prefers_node_specific(guard_db_session
         [
             SecurityRule(
                 pattern=r"^uniquepat\b",
-                level="review",
+                level="allow",
                 priority=5,
                 enabled=True,
                 node_id=None,

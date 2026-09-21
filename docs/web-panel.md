@@ -75,8 +75,8 @@ Each log entry includes:
 | Node            | Which node it ran on                                               |
 | Exit code       | Process exit code (0 = success; empty for denied commands)         |
 | stdout / stderr | Full command output                                                |
-| Security level  | Which rule level matched (block/review/allow)                      |
-| Gate score      | Calibrated P(safe) for review-level rows, when the gate was called |
+| Security level  | Disposition (block/allow/gate; legacy logs may show review)                      |
+| Gate score      | Calibrated P(safe) for gated rows, when the gate was called |
 | Gate reason     | For denials: `unsafe`, `error`, or `disabled`                      |
 | Duration        | Execution time in milliseconds                                     |
 | Timestamp       | When the command was executed                                      |

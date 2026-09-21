@@ -43,7 +43,7 @@ async def test_rule_list_effective_merges_global_and_node_rules(db_session):
         encrypted_credential="e",
     )
     rrepo = RuleRepo(db_session)
-    await rrepo.create(pattern=r"^g\d$", level="review", priority=1, node_id=None)
+    await rrepo.create(pattern=r"^g\d$", level="allow", priority=1, node_id=None)
     await rrepo.create(pattern=r"^n\d$", level="block", priority=2, node_id=node.id)
     await rrepo.create(pattern=r"^g\d$", level="allow", priority=3, node_id=node.id)
     merged = await rrepo.list_effective(node.id)
@@ -158,7 +158,7 @@ async def test_log_repo_persists_gate_metadata(db_session):
         node_id=node.id,
         command="sudo reboot",
         exit_code=None,
-        security_level="review",
+        security_level="gate",
         security_rule_id="rule-1",
         gate_score=0.23,
         gate_reason="unsafe",
@@ -167,5 +167,5 @@ async def test_log_repo_persists_gate_metadata(db_session):
     assert fetched.gate_score == 0.23
     assert fetched.gate_reason == "unsafe"
     assert fetched.exit_code is None
-    assert fetched.security_level == "review"
+    assert fetched.security_level == "gate"
     assert fetched.security_rule_id == "rule-1"

@@ -7,9 +7,9 @@ via the ``shuttle://nodes`` resource, not a tool.)
 Sessions are managed implicitly: ``ssh_run`` auto-creates or reuses a session
 per node so that working directory context is preserved across calls.
 
-Every command runs through CommandGuard first. ``block`` and ``review``
-matches are denied with one fixed error string — no scores, rule text, or
-retry instructions ever reach the caller.
+Every command runs through CommandGuard first. ``block`` and gated
+dispositions are denied with one fixed error string — no scores, rule text,
+or retry instructions ever reach the caller.
 """
 
 from __future__ import annotations
@@ -108,9 +108,9 @@ async def _execute_command_logic(
     """Execute a command with security checks, node resolution, and DB logging.
 
     Security comes before any session work: a denied command never opens an
-    SSH session. Review-level commands are scored by the injected gate when
-    it is enabled; scores at or above ``SAFE_THRESHOLD`` execute, everything
-    else (below threshold, gate failure, disabled gate) is denied and logged.
+    SSH session. Unmatched commands are scored by the injected gate when it
+    is enabled; scores at or above ``SAFE_THRESHOLD`` execute, everything else
+    (below threshold, gate failure, disabled gate) is denied and logged.
 
     Returns the command output or a security/error message. Every security
     denial is the fixed string ``DENIED_MESSAGE``.
@@ -156,7 +156,7 @@ async def _execute_command_logic(
     gate_score: float | None = None
     gate_reason: str | None = None
 
-    if decision.level == SecurityLevel.REVIEW and _gate_ready(gate, settings):
+    if decision.level == SecurityLevel.GATE and _gate_ready(gate, settings):
         try:
             gate_score = await gate.is_safe(
                 state={"command": command, "node": resolved_node},
@@ -168,7 +168,7 @@ async def _execute_command_logic(
         else:
             if gate_score < SAFE_THRESHOLD:
                 gate_reason = "unsafe"
-    elif decision.level == SecurityLevel.REVIEW:
+    elif decision.level == SecurityLevel.GATE:
         gate_reason = "disabled"
 
     if decision.level == SecurityLevel.BLOCK or gate_reason is not None:
@@ -268,7 +268,7 @@ def register_tools(
     guard : CommandGuard
         Security evaluator.
     gate : GatePort | None
-        LLM gate for review-level commands (None denies review as disabled).
+        LLM gate for unmatched commands (None denies as disabled).
     session_mgr : SessionManager
         Session manager.
     db_session_ctx : callable

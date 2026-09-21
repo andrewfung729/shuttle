@@ -1,6 +1,6 @@
 """Tests for shuttle.mcp.tools — _execute_command_logic unit tests.
 
-Covers the block / review / allow decision matrix at the command
+Covers the block / gate / allow decision matrix at the command
 orchestration seam — including the LLM-gate branches — auto-session
 handling, DB logging, and error paths. The gate is always a stub: tests
 never hit the real endpoint.
@@ -135,15 +135,23 @@ async def test_allowed_command_executes():
 
 
 @pytest.mark.asyncio
-async def test_no_rule_match_still_executes_when_healthy():
-    """The default decision (no rule matched) is ALLOW."""
+async def test_no_rule_match_defaults_to_gate_and_needs_gate():
+    """Unmatched commands are GATE: execute only when the gate scores safe."""
     session = SSHSession(session_id="s1", node_id="n1")
-    guard = _make_guard(SecurityLevel.ALLOW, message="", rule=None)
+    guard = _make_guard(SecurityLevel.GATE, message="", rule=None)
     session_mgr = _make_session_mgr(session)
+    gate = StubGate(score=0.99)
 
-    result = await _run(guard, session_mgr, command="uptime")
+    result = await _run(
+        guard,
+        session_mgr,
+        command="uptime",
+        gate=gate,
+        settings=_gate_settings(),
+    )
 
     assert result == "ok"
+    assert len(gate.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -165,10 +173,10 @@ async def test_blocked_command_returns_fixed_denial():
 
 
 @pytest.mark.asyncio
-async def test_review_command_returns_fixed_denial():
-    """REVIEW without a gate: exact fixed string, no execution."""
+async def test_gate_command_returns_fixed_denial():
+    """GATE without a gate: exact fixed string, no execution."""
     session = SSHSession(session_id="s1", node_id="n1")
-    guard = _make_guard(SecurityLevel.REVIEW, message="sudo")
+    guard = _make_guard(SecurityLevel.GATE, message="sudo")
     session_mgr = _make_session_mgr(session)
 
     result = await _run(guard, session_mgr, command="sudo ls")
@@ -178,7 +186,7 @@ async def test_review_command_returns_fixed_denial():
 
 
 # ---------------------------------------------------------------------------
-# LLM gate matrix (review-level commands)
+# LLM gate matrix (gated commands)
 # ---------------------------------------------------------------------------
 
 
@@ -191,10 +199,10 @@ def _gate_settings(enabled=True, key="sk-or-test"):
 
 
 @pytest.mark.asyncio
-async def test_review_gate_safe_score_executes():
-    """review + gate on + score >= threshold -> executes."""
+async def test_gate_safe_score_executes():
+    """gate disposition + gate on + score >= threshold -> executes."""
     session = SSHSession(session_id="s1", node_id="n1")
-    guard = _make_guard(SecurityLevel.REVIEW)
+    guard = _make_guard(SecurityLevel.GATE)
     mgr = _make_session_mgr(session)
     gate = StubGate(score=SAFE_THRESHOLD)
 
@@ -216,10 +224,10 @@ async def test_review_gate_safe_score_executes():
 
 
 @pytest.mark.asyncio
-async def test_review_gate_unsafe_score_denies_and_logs():
-    """review + score < threshold -> fixed denial, log row with score + unsafe."""
+async def test_gate_unsafe_score_denies_and_logs():
+    """gate + score < threshold -> fixed denial, log row with score + unsafe."""
     session = SSHSession(session_id="s1", node_id="n1")
-    guard = _make_guard(SecurityLevel.REVIEW)
+    guard = _make_guard(SecurityLevel.GATE)
     mgr = _make_session_mgr(session)
     gate = StubGate(score=0.42)
 
@@ -238,14 +246,14 @@ async def test_review_gate_unsafe_score_denies_and_logs():
     kwargs = mock_log_repo.create.call_args.kwargs
     assert kwargs["gate_score"] == 0.42
     assert kwargs["gate_reason"] == "unsafe"
-    assert kwargs["security_level"] == "review"
+    assert kwargs["security_level"] == "gate"
     assert kwargs["exit_code"] is None
 
 
 @pytest.mark.asyncio
-async def test_review_gate_error_denies_and_logs_error():
+async def test_gate_error_denies_and_logs_error():
     """Gate exception/timeout -> fixed denial, log row reason=error, no score."""
-    guard = _make_guard(SecurityLevel.REVIEW)
+    guard = _make_guard(SecurityLevel.GATE)
     mgr = _make_session_mgr(None)
     gate = StubGate(error=TimeoutError("gate timed out"))
 
@@ -263,9 +271,9 @@ async def test_review_gate_error_denies_and_logs_error():
 
 
 @pytest.mark.asyncio
-async def test_review_gate_disabled_denies_and_logs_disabled():
+async def test_gate_disabled_denies_and_logs_disabled():
     """gate_enabled=false -> fixed denial, log row reason=disabled, no gate call."""
-    guard = _make_guard(SecurityLevel.REVIEW)
+    guard = _make_guard(SecurityLevel.GATE)
     mgr = _make_session_mgr(None)
     gate = StubGate(score=0.99)
 
@@ -286,9 +294,9 @@ async def test_review_gate_disabled_denies_and_logs_disabled():
 
 
 @pytest.mark.asyncio
-async def test_review_gate_missing_key_denies():
+async def test_gate_missing_key_denies():
     """Enabled gate but no API key -> disabled denial (fail closed)."""
-    guard = _make_guard(SecurityLevel.REVIEW)
+    guard = _make_guard(SecurityLevel.GATE)
     mgr = _make_session_mgr(None)
     gate = StubGate(score=0.99)
 
@@ -305,9 +313,9 @@ async def test_review_gate_missing_key_denies():
 
 
 @pytest.mark.asyncio
-async def test_review_gate_none_denies_disabled():
+async def test_gate_none_denies_disabled():
     """No gate wired at all (server construction skipped it) -> disabled."""
-    guard = _make_guard(SecurityLevel.REVIEW)
+    guard = _make_guard(SecurityLevel.GATE)
     mgr = _make_session_mgr(None)
 
     mock_log_repo = MagicMock()
@@ -344,10 +352,10 @@ async def test_block_denies_and_logs_without_gate_call():
 
 
 @pytest.mark.asyncio
-async def test_review_gate_safe_logs_score_on_executed_row():
-    """An executed review command records its passing gate score."""
+async def test_gate_safe_logs_score_on_executed_row():
+    """An executed gated command records its passing gate score."""
     session = SSHSession(session_id="s1", node_id="n1")
-    guard = _make_guard(SecurityLevel.REVIEW)
+    guard = _make_guard(SecurityLevel.GATE)
     mgr = _make_session_mgr(session)
     gate = StubGate(score=0.97)
 
@@ -367,7 +375,7 @@ async def test_review_gate_safe_logs_score_on_executed_row():
 @pytest.mark.asyncio
 async def test_denial_still_returned_when_denial_log_fails():
     """A denial-log DB failure must not turn a denial into anything else."""
-    guard = _make_guard(SecurityLevel.REVIEW)
+    guard = _make_guard(SecurityLevel.GATE)
     mgr = _make_session_mgr(None)
     gate = StubGate(score=0.1)
 
@@ -384,7 +392,7 @@ async def test_denial_still_returned_when_denial_log_fails():
 @pytest.mark.asyncio
 async def test_denial_does_not_create_session():
     """A denied command must not open an SSH session just to be refused."""
-    guard = _make_guard(SecurityLevel.REVIEW)
+    guard = _make_guard(SecurityLevel.GATE)
     session_mgr = _make_session_mgr(None)
 
     await _run(guard, session_mgr, command="sudo ls")

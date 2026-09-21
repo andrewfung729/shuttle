@@ -103,17 +103,21 @@ async def mcp_server(mock_pool, mock_session_mgr, db_factory, tmp_path):
             encrypted_credential="enc",
         )
 
+    class _SafeGate:
+        async def is_safe(self, state, instructions):
+            return 0.99
+
     register_tools(
         mcp=mcp,
         pool=mock_pool,
         guard=guard,
-        gate=None,  # no gate wired: review-level commands deny as disabled
+        gate=_SafeGate(),  # unmatched commands pass the gate in this fixture
         session_mgr=mock_session_mgr,
         db_session_ctx=db_session_ctx,
         node_repo_factory=NodeRepo,
         settings=SimpleNamespace(
-            gate_enabled=False,
-            openrouter_api_key=None,
+            gate_enabled=True,
+            openrouter_api_key="sk-or-test",
             gate_safe_instructions="be strict",
         ),
         cred_mgr=cred_mgr,
@@ -198,8 +202,8 @@ async def test_list_nodes_via_client(mcp_server):
 
 
 @pytest.mark.asyncio
-async def test_run_allowed_command_via_client(mcp_server_with_session):
-    """ALLOW-level command executes and returns output through Client."""
+async def test_run_gated_safe_command_via_client(mcp_server_with_session):
+    """Unmatched command + safe gate score executes and returns output."""
     async with Client(mcp_server_with_session) as client:
         result = await client.call_tool(
             "ssh_run", {"command": "hostname", "node": "test-node"}
@@ -231,20 +235,47 @@ async def test_run_blocked_command_via_client(mcp_server_with_session, db_factor
 
 
 @pytest.mark.asyncio
-async def test_run_review_command_denied_via_client(
-    mcp_server_with_session, db_factory
+async def test_run_unmatched_command_denied_when_gate_off(
+    tmp_path, db_factory, mock_pool, mock_session_mgr
 ):
-    """REVIEW command without a gate: fixed denial, no approval protocol."""
+    """Unmatched command with gate disabled: fixed denial."""
+    from shuttle.core.credentials import CredentialManager
+
+    mcp = FastMCP(name="gate-off")
+    session = SSHSession(session_id="s1", node_id="test-node")
+    mock_session_mgr.list_active.return_value = [session]
+
+    @asynccontextmanager
+    async def db_session_ctx():
+        async with db_factory() as sess:
+            yield sess
+
     async with db_factory() as sess:
-        rule_repo = RuleRepo(sess)
-        await rule_repo.create(
-            pattern=r"^sudo\b",
-            level="review",
-            description="Review sudo",
-            priority=0,
+        await NodeRepo(sess).create(
+            name="test-node",
+            host="10.0.0.1",
+            username="root",
+            auth_type="password",
+            encrypted_credential="enc",
         )
 
-    async with Client(mcp_server_with_session) as client:
+    register_tools(
+        mcp=mcp,
+        pool=mock_pool,
+        guard=CommandGuard(),
+        gate=None,
+        session_mgr=mock_session_mgr,
+        db_session_ctx=db_session_ctx,
+        node_repo_factory=NodeRepo,
+        settings=SimpleNamespace(
+            gate_enabled=False,
+            openrouter_api_key=None,
+            gate_safe_instructions="be strict",
+        ),
+        cred_mgr=CredentialManager(tmp_path),
+    )
+
+    async with Client(mcp) as client:
         result = await client.call_tool(
             "ssh_run", {"command": "sudo ls", "node": "test-node"}
         )
@@ -253,10 +284,10 @@ async def test_run_review_command_denied_via_client(
 
 
 @pytest.mark.asyncio
-async def test_run_review_gate_pass_via_client(
+async def test_run_gate_pass_via_client(
     tmp_path, db_factory, mock_pool, mock_session_mgr
 ):
-    """Protocol-level: review + stub gate score >= threshold executes and logs."""
+    """Protocol-level: unmatched + stub gate score >= threshold executes and logs."""
     from shuttle.core.credentials import CredentialManager
     from shuttle.core.session import SSHSession
 
@@ -307,11 +338,6 @@ async def test_run_review_gate_pass_via_client(
         cred_mgr=CredentialManager(tmp_path),
     )
 
-    async with db_factory() as sess:
-        await RuleRepo(sess).create(
-            pattern=r"^sudo\b", level="review", description="Review sudo", priority=0
-        )
-
     async with Client(mcp) as client:
         result = await client.call_tool(
             "ssh_run", {"command": "sudo uptime", "node": "test-node"}
@@ -359,7 +385,7 @@ async def test_run_persists_log_to_real_db(mcp_server_with_session, db_factory):
     log = logs[-1]
     assert log.command == "whoami"
     assert log.exit_code == 0
-    assert log.security_level == "allow"
+    assert log.security_level == "gate"
     assert log.duration_ms is not None
     assert log.duration_ms >= 0
 

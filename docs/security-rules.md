@@ -1,26 +1,26 @@
 # Security Rules
 
-Shuttle evaluates every command against a rule engine before execution. Rules use regex patterns and three security levels; review-level matches are scored by an LLM gate. This guide covers how rules work, the built-in defaults, per-node overrides, and the gate.
+Shuttle evaluates every command against a rule engine before execution. Rules use regex patterns and two security levels; anything that does not match a rule is scored by an LLM gate. This guide covers how rules work, the built-in defaults, per-node overrides, and the gate.
 
-> **Removed in v3 (breaking):** the human Approval Queue (`approval_id`, claim loop, panel Approvals page), session Bypass Patterns, and the `confirm`/`warn` levels are gone. The LLM gate replaces the human-approve path. Existing databases must update rule levels (`confirm` → `review`; `warn` rules delete) or re-seed — unknown levels are skipped at evaluation, never reinterpreted.
+> **Removed:** the human Approval Queue, session Bypass Patterns, and the `confirm` / `warn` / `review` *rule* levels. The LLM gate is the default disposition for unmatched commands — not a rule you author. Existing databases with legacy `review`/`confirm`/`warn` rows skip those rules at evaluation (never reinterpreted); re-seed or delete them.
 
 ## Security Levels
 
-Every rule has one of three levels. When a command matches a rule, Shuttle takes the corresponding action:
+Rules only use two levels. Unmatched commands take the **gate** disposition (not a rule level).
 
-| Level      | Behavior                                                                              | When to use                                                                     |
-| ---------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| **block**  | Denied immediately. Never calls the gate.                                             | Destructive, unrecoverable operations (wipe disk, fork bomb).                   |
-| **review** | Scored by the LLM gate: executes when the calibrated safety score ≥ 0.9, else denied. | Privileged or risky operations where routine matches are fine but abuse is not. |
-| **allow**  | Executes normally.                                                                    | The default — any command that does not match a higher-level rule.              |
+| Level / disposition | Behavior | When to use |
+| --- | --- | --- |
+| **block** (rule) | Denied immediately. Never calls the gate. | Destructive, unrecoverable operations (wipe disk, fork bomb). |
+| **allow** (rule) | Executes normally. Never calls the gate. | Explicit allowlist — known-safe patterns you trust without a score. |
+| **gate** (default) | Scored by the LLM gate: executes when calibrated safety score ≥ 0.9, else denied. | Everything that is neither blocked nor explicitly allowed. |
 
-Rules are evaluated in **priority order** (lowest number first). The first matching rule determines the outcome. If no rule matches, the command is allowed.
+Rules are evaluated in **priority order** (lowest number first). The first matching **block** or **allow** rule wins. If no rule matches, the command is **gated** (fail closed).
 
-Every denial — block rule, unsafe gate score, gate failure, or gate disabled — returns the same fixed string to the agent: `Error: denied by policy`. No scores, rule text, or retry instructions are exposed; the details live in the command log for operators.
+Every denial — block rule, unsafe gate score, gate failure, or gate disabled — returns the same fixed string to the agent: `Error: denied by policy`. No scores, rule text, or retry instructions are exposed; the details live in the command log for operators (`security_level` is `block` or `gate`).
 
 ## The LLM Gate
 
-When a `review`-level rule matches:
+When the disposition is `gate` (no block/allow match):
 
 1. If the gate is disabled (`SHUTTLE_GATE_ENABLED=false`, the default) or no API key is set, the command is denied (reason `disabled`). This makes local development behave identically, minus gate calls.
 1. Otherwise the gate asks a decision model (default `typesafe/jev-1.13` via OpenRouter's System One API) a single `is_safe` question about the command and node name. The model sees only that — no session history, secrets, or rule corpus.
@@ -58,33 +58,13 @@ Rule patterns are Python-compatible regular expressions matched with `re.search(
 | `chmod 777`          | `chmod 777 /var/www`              | `chmod 755 /var/www`      |
 | `:\(\)\{.*:\|:&\};:` | Fork bomb pattern                 | Normal commands           |
 
-Patterns are capped at 500 characters to prevent ReDoS attacks. Invalid regex patterns are silently skipped, as are rules with unknown levels (e.g. legacy `confirm`/`warn` rows).
+Patterns are capped at 500 characters to prevent ReDoS attacks. Invalid regex patterns are silently skipped, as are rules with unknown levels (e.g. legacy `review`/`confirm`/`warn` rows).
 
 ## Built-in Default Rules
 
-These rules are seeded into the database on first startup (only if no rules exist yet). They provide a sensible baseline.
+These rules are seeded into the database on first startup (only if no rules exist yet). They provide a sensible baseline of **block** rules for catastrophic ops. Everything else is gated unless you add **allow** rules.
 
-### Block (priority 1--4)
-
-| Priority | Pattern              | Description            |
-| -------- | -------------------- | ---------------------- |
-| 1        | `^rm -rf /$`         | Remove root filesystem |
-| 2        | `mkfs\.`             | Format filesystem      |
-| 3        | `dd if=.* of=/dev/`  | Raw disk write         |
-| 4        | `:\(\)\{.*:\|:&\};:` | Fork bomb              |
-
-### Review (priority 10--15)
-
-| Priority | Pattern     | Description                |
-| -------- | ----------- | -------------------------- |
-| 10       | `sudo .*`   | Sudo commands              |
-| 11       | `rm -rf `   | Recursive force delete     |
-| 12       | `chmod 777` | World-writable permissions |
-| 13       | `shutdown`  | System shutdown            |
-| 14       | `reboot`    | System reboot              |
-| 15       | `kill -9`   | Force kill process         |
-
-You can add, edit, disable, or delete these rules through the web panel or directly in the `security_rules` database table.
+See `src/shuttle/db/seeds.py` for the current seed list (operator-maintained).
 
 ## Per-Node Rule Overrides
 
@@ -101,11 +81,10 @@ Rules can be **global** (apply to all nodes) or **node-specific** (apply to a si
 
 ```
 Global rules:
-  sudo .*  → review  (priority 10)
-  rm -rf   → review  (priority 11)
+  ^rm -rf /$  → block  (priority 1)
 
 GPU Server overrides:
-  sudo .*  → allow   (priority 10)  ← overrides global for this node
+  ^apt  → allow   (priority 20)  ← known-safe package installs on this node
 
 Prod Server overrides:
   DROP TABLE → block (priority 5)   ← adds new rule for this node
@@ -113,9 +92,9 @@ Prod Server overrides:
 
 Result:
 
-- **GPU Server**: `sudo apt update` is allowed (node override). `rm -rf /tmp` still goes through the gate (global rule, no override).
-- **Prod Server**: `DROP TABLE users` is blocked (node-specific rule). `sudo service restart` goes through the gate (global rule).
-- **Other nodes**: Both `sudo` and `rm -rf` go through the gate (global rules only).
+- **GPU Server**: `apt install foo` is allowed (node override). `cat /etc/passwd` is gated (no match).
+- **Prod Server**: `DROP TABLE users` is blocked. Routine reads are gated.
+- **Other nodes**: Only the global block list applies; everything else is gated.
 
 ### Creating Node Overrides
 
@@ -123,15 +102,17 @@ In the web panel, navigate to **Rules**, select a node, and add a rule with the 
 
 ## Best Practices
 
-1. **Start with the defaults.** The built-in rules cover the most common dangerous operations. Add rules as you discover patterns specific to your environment.
+1. **Start with block for catastrophe, allow for hot paths.** Unmatched work already goes through the gate — you do not need a "review" rule for `sudo`.
 
-1. **Use block sparingly.** Block rules never reach the gate. Reserve them for truly catastrophic commands (disk wipe, fork bomb). For risky-but-routine commands, review is a better choice — the gate sorts routine from abuse.
+1. **Use block sparingly.** Block rules never reach the gate. Reserve them for truly catastrophic commands (disk wipe, fork bomb).
 
-1. **Tighten prod, loosen dev.** Use per-node overrides to allow `sudo` on development servers while keeping it at review on production.
+1. **Allowlist what must be fast/cheap.** High-frequency read-only patterns (`^ls `, `^cat `, `^docker ps`) can be allow rules so they skip Jev latency and cost.
+
+1. **Tighten prod, loosen dev.** Use per-node allow overrides on development servers; keep prod on gate + block only.
 
 1. **Be specific with patterns.** `rm -rf /` (with anchor) is better than `rm` (too broad). Test your regex against expected commands before deploying.
 
-1. **Use priority to control ordering.** Lower numbers are evaluated first. Place block rules at low priorities (1--9) and review rules in the middle (10--19).
+1. **Use priority to control ordering.** Lower numbers are evaluated first. Place block rules at low priorities (1--9); allow rules can sit higher.
 
 1. **Watch the denied rows.** The Activity log shows every denial with the gate score and reason (`unsafe` / `error` / `disabled`). A flood of `disabled` means the gate is off; recurring `unsafe` false positives are your cue to add an allow rule via the shortcut.
 

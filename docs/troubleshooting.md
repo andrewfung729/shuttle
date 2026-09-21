@@ -86,9 +86,9 @@ Ensure `uvx shuttle-mcp --help` works, or run `uv tool install shuttle-mcp` and 
 1. Use the **Rule Tester** (Rules page → Test button) to see which rule matches
 1. Adjust or delete the overly broad rule
 
-### Every review-level command is denied
+### Every gated command is denied
 
-**Symptom:** `sudo ...` and other review-level commands all return `Error: denied by policy`, and the Activity log shows reason `disabled`.
+**Symptom:** Unmatched commands (no block/allow rule) all return `Error: denied by policy`, and the Activity log shows reason `disabled`.
 
 This is the fail-closed default: the LLM gate is off. Enable it:
 
@@ -98,7 +98,7 @@ This is the fail-closed default: the LLM gate is off. Enable it:
 
 ### Gate denies a command I consider safe
 
-**Symptom:** Activity log shows a review-level denial with reason `unsafe` and a low score.
+**Symptom:** Activity log shows a gate denial with reason `unsafe` and a low score.
 
 1. The calibrated threshold is deliberately strict (0.9). Check the logged score — borderline commands (privilege changes especially) sit at 0.5-0.7 by design.
 1. Use the **create allow rule** shortcut on the denied row to add an explicit allow rule for that command — a human-authored policy change, not a one-off unlock.

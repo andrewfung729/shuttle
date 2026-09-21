@@ -16,16 +16,16 @@ async def test_create_rule(client):
         "/api/rules",
         json={
             "pattern": "sudo .*",
-            "level": "review",
-            "description": "Review sudo",
+            "level": "allow",
+            "description": "Allow sudo",
             "priority": 10,
         },
     )
     assert resp.status_code == 201
     data = resp.json()
     assert data["pattern"] == "sudo .*"
-    assert data["level"] == "review"
-    assert data["description"] == "Review sudo"
+    assert data["level"] == "allow"
+    assert data["description"] == "Allow sudo"
     assert data["priority"] == 10
     assert "id" in data
 
@@ -35,7 +35,7 @@ async def test_update_rule(client):
     # Create a rule first
     create_resp = await client.post(
         "/api/rules",
-        json={"pattern": "rm -rf .*", "level": "review"},
+        json={"pattern": "rm -rf .*", "level": "allow"},
     )
     assert create_resp.status_code == 201
     rule_id = create_resp.json()["id"]

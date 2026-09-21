@@ -64,30 +64,27 @@ def register_prompts(
                 f"## Command Safety Check\n\n"
                 f"**Command**: `{command}`\n"
                 f"**Node**: {node or '(auto-select)'}\n"
-                f"**Result**: ✅ ALLOW — no security rules matched.\n\n"
-                "You can proceed with `ssh_run(command=...)`."
+                f"**Result**: ⚖️ GATE — no security rules matched; the LLM gate decides.\n\n"
+                "Call `ssh_run(command=...)`. If denied, ask the operator for an allow rule."
             )
 
         lines = []
         highest_level = "ALLOW"
-        level_order = {"BLOCK": 3, "REVIEW": 2, "ALLOW": 0}
+        level_order = {"BLOCK": 3, "ALLOW": 0}
         for r in matching:
             lines.append(
                 f"  • [{r.level}] pattern=`{r.pattern}` — {r.description or 'no description'}"
             )
-            if level_order.get(r.level, 0) > level_order.get(highest_level, 0):
-                highest_level = r.level
+            if level_order.get(r.level.upper(), 0) > level_order.get(
+                highest_level, 0
+            ):
+                highest_level = r.level.upper()
 
-        icon = {"BLOCK": "⛔", "REVIEW": "⚖️"}.get(highest_level, "✅")
+        icon = {"BLOCK": "⛔"}.get(highest_level, "✅")
 
         advice = {
             "BLOCK": "This command will be denied. Rephrase or use an alternative approach.",
-            "REVIEW": (
-                "This command is gated: it executes only when the LLM gate scores "
-                "it safe. If it is denied you will see a fixed policy error — ask "
-                "the operator to adjust the Security Rules if it was a false positive."
-            ),
-        }.get(highest_level, "Proceed normally.")
+        }.get(highest_level, "Proceed normally (explicit allow rule).")
 
         return (
             f"## Command Safety Check\n\n"

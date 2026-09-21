@@ -15,11 +15,19 @@ if TYPE_CHECKING:
 
 
 class SecurityLevel(str, Enum):
-    """Security levels used when evaluating a command against security rules."""
+    """Disposition after CommandGuard.evaluate().
+
+    ``block`` / ``allow`` are the only valid *rule* levels. ``gate`` is the
+    fail-closed default when nothing matches — never stored on a rule row.
+    """
 
     BLOCK = "block"
-    REVIEW = "review"
     ALLOW = "allow"
+    GATE = "gate"
+
+
+# Levels an operator may put on a SecurityRule row.
+RULE_LEVELS = frozenset({SecurityLevel.BLOCK, SecurityLevel.ALLOW})
 
 
 @dataclass
@@ -59,6 +67,8 @@ class CommandGuard:
         Returns
         -------
         SecurityDecision
+            First matching rule wins (by priority). No match → GATE
+            (LLM gate). Only an explicit allow rule bypasses the gate.
         """
         from shuttle.db.models import SecurityRule
 
@@ -92,9 +102,10 @@ class CommandGuard:
                     try:
                         level = SecurityLevel(rule.level)
                     except ValueError:
-                        # Unknown level (e.g. legacy confirm/warn rows) — skip
-                        # rather than silently reinterpret. Consistent with the
-                        # invalid-regex skip below.
+                        level = None
+                    # Only block/allow are rule levels. Legacy review/confirm/warn
+                    # (and bare "gate") are skipped — never reinterpreted.
+                    if level not in RULE_LEVELS:
                         logger.warning(
                             "Skipping rule {id} with unknown level {level!r}",
                             id=rule.id,
@@ -109,4 +120,5 @@ class CommandGuard:
             except re.error:
                 continue
 
-        return SecurityDecision(level=SecurityLevel.ALLOW)
+        # Fail closed: unmatched → LLM gate.
+        return SecurityDecision(level=SecurityLevel.GATE)

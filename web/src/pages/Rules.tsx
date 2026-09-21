@@ -251,7 +251,7 @@ export default function Rules() {
             Security Rules
           </h1>
           <p className="mt-1 text-[13px] text-[var(--text-tertiary)]">
-            Control which commands are blocked, sent to the LLM gate for review, or allowed.
+            Control which commands are blocked or explicitly allowed. Everything else goes through the LLM gate.
             Drag to reorder priority.
           </p>
         </div>
@@ -417,7 +417,7 @@ export default function Rules() {
                 </div>
               ) : (
                 <p className="rounded-lg bg-[var(--bg-tertiary)] px-4 py-2.5 text-[12px] text-[var(--success)]">
-                  ✓ No rules match this command — it will be allowed
+                  ⚖ No rules match this command — it will be scored by the LLM gate
                 </p>
               )}
             </div>
@@ -436,7 +436,7 @@ export default function Rules() {
           <EmptyState
             icon={Shield}
             title="No rules configured"
-            description="Add security rules to control command execution. Rules can block, review (LLM gate), or allow specific command patterns."
+            description="Add security rules to block dangerous commands or allow known-safe ones. Unmatched commands go through the LLM gate."
             action={
               <button
                 onClick={openAddForm}

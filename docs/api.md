@@ -20,7 +20,7 @@ Run a shell command on a remote SSH node. Sessions are managed automatically: wo
 
 1. Command is evaluated against security rules
 1. `block` → denied immediately
-1. `review` → scored by the LLM gate when enabled: calibrated safe score ≥ threshold executes; below threshold, gate error, or gate disabled → denied
+1. unmatched (`gate`) → scored by the LLM gate when enabled: calibrated safe score ≥ threshold executes; below threshold, gate error, or gate disabled → denied
 1. `allow` (or no match) → executes normally
 
 Every denial returns the same fixed string: `Error: denied by policy`. There are no approval ids, retry recipes, or denial reasons for the agent — operators see the details in the web panel's command log.
@@ -109,7 +109,7 @@ Detailed information for one node, including its connection pool state.
 
 All security rules governing command execution, grouped by level.
 
-**Returns:** JSON — `{"rules": [...], "total": N, "by_level": {"block": n, "review": n, ...}}`, each rule with `id`, `pattern`, `level`, `description`, `priority`, `enabled`, `node_id`. Read this before running commands that might be blocked or gated.
+**Returns:** JSON — `{"rules": [...], "total": N, "by_level": {"block": n, "allow": n, ...}}`, each rule with `id`, `pattern`, `level`, `description`, `priority`, `enabled`, `node_id`. Read this before running commands that might be blocked or gated.
 
 ## shuttle://sessions
 

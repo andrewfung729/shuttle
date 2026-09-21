@@ -60,7 +60,7 @@ class NodeTestResult(BaseModel):
 
 class RuleCreate(BaseModel):
     pattern: str = Field(..., min_length=1)
-    level: str = Field(..., pattern=r"^(block|review|allow)$")
+    level: str = Field(..., pattern=r"^(block|allow)$")
     node_id: str | None = None
     description: str | None = None
     priority: int = 0
@@ -70,7 +70,7 @@ class RuleCreate(BaseModel):
 
 class RuleUpdate(BaseModel):
     pattern: str | None = None
-    level: str | None = Field(None, pattern=r"^(block|review|allow)$")
+    level: str | None = Field(None, pattern=r"^(block|allow)$")
     node_id: str | None = None
     description: str | None = None
     priority: int | None = None
