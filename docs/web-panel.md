@@ -40,6 +40,8 @@ To reset the token, delete `~/.shuttle/web_token` and restart `shuttle serve`.
 
 Note: The `/mcp/` endpoint is **not** gated by this token. MCP clients connect without authentication.
 
+> **Security-relevant:** the panel exposes command history (including output) and lets anyone with access edit Security Rules — editing rules is a **capability**. If the panel is exposed beyond localhost, always set the API token. (Per-user panel identity is a planned follow-up.)
+
 ## Overview Page
 
 The Overview page is the landing page of the web panel. It shows:
@@ -67,16 +69,30 @@ The Activity page is a command log viewer that shows every command executed thro
 
 Each log entry includes:
 
-| Field           | Description                                         |
-| --------------- | --------------------------------------------------- |
-| Command         | The executed command text                           |
-| Node            | Which node it ran on                                |
-| Exit code       | Process exit code (0 = success)                     |
-| stdout / stderr | Full command output                                 |
-| Security level  | Which rule level matched (block/confirm/warn/allow) |
-| Duration        | Execution time in milliseconds                      |
-| Timestamp       | When the command was executed                       |
-| Bypassed        | Whether a confirm rule was bypassed with a token    |
+| Field           | Description                                                                                                        |
+| --------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Command         | The command text                                                                                                   |
+| Node            | Which node it ran on                                                                                               |
+| Exit code       | Process exit code (0 = success; non-success if the command or the session open failed; empty for denied commands) |
+| stdout / stderr | Full command output                                                                                                |
+| Security level  | Disposition (block/allow/gate; legacy logs may show review)                                                        |
+| Gate score      | Calibrated P(safe) for gated rows, when the gate was called                                                        |
+| Gate reason     | For denials: `unsafe`, `error`, `disabled`, `capped`, `denied`, or `expired`; `once` for a run-once Hold execution |
+| Duration        | Execution time in milliseconds                                                                                     |
+| Timestamp       | When the command was executed                                                                                      |
+
+**Denied commands** show a red "denied · reason" badge (plus the gate score when present) and a **create allow rule** shortcut that opens the Rules form pre-filled with the command — fixing a false positive is one explicit policy change.
+
+## Holds Page
+
+The Holds page is the Operator's decision surface for the **uncertain band** — commands the LLM gate scored neither clearly safe nor clearly unsafe. It lists Holds with the context needed to judge them: node, exact command, the server-derived client and conversation, the gate score, and recent commands from that conversation. History can be filtered by status.
+
+Each pending Hold offers two actions:
+
+- **Run once** — executes this exact command once, in a server-owned task, and stores the output on the Hold. The waiting agent receives it inline, or picks it up by retrying the identical command. A run-once command can run even after the requester disconnected; that is intentional, and the output remains available.
+- **Deny** — stops the command and suppresses a new Hold for the same conversation + node + command for the rest of the conversation. An optional **Denial Note** is returned to the agent as `Error: denied by policy: <note>` — the only operator-authored text the agent ever receives. It is collapsed to one line and capped at 500 characters.
+
+Decisions are recorded with the deciding identity, timestamp, and note. The requesting agent can never reach this surface — decide is not an MCP tool, and the page sits behind the same panel Bearer token as every other page.
 
 ## Security Rules Page
 

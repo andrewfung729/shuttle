@@ -12,6 +12,7 @@ from shuttle.db.engine import create_db_engine, create_session_factory
 _engine = None
 _session_factory = None
 _api_token: str | None = None
+_holds = None
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -31,6 +32,17 @@ def init_db_deps(
     else:
         _engine = create_db_engine(db_url)
         _session_factory = create_session_factory(_engine)
+
+
+def set_holds_manager(holds) -> None:
+    """Register the process-wide Hold seam for the panel decide adapter."""
+    global _holds
+    _holds = holds
+
+
+def get_holds_manager():
+    """Return the Hold seam, or None when the panel has no manager wired."""
+    return _holds
 
 
 async def verify_token(

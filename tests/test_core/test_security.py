@@ -1,17 +1,11 @@
-"""Tests for CommandGuard and ConfirmTokenStore."""
-
-import time
+"""Tests for CommandGuard: block/allow rules, default gate disposition."""
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from shuttle.core.security import (
-    CommandGuard,
-    ConfirmTokenStore,
-    SecurityLevel,
-)
+from shuttle.core.security import RULE_LEVELS, CommandGuard, SecurityLevel
 from shuttle.db.models import Base, SecurityRule
 
 # ---------------------------------------------------------------------------
@@ -20,11 +14,12 @@ from shuttle.db.models import Base, SecurityRule
 
 
 def test_security_level_values():
-    """SecurityLevel must expose the four expected string values."""
+    """Disposition enum: block / allow rules + gate default."""
     assert SecurityLevel.BLOCK == "block"
-    assert SecurityLevel.CONFIRM == "confirm"
-    assert SecurityLevel.WARN == "warn"
     assert SecurityLevel.ALLOW == "allow"
+    assert SecurityLevel.GATE == "gate"
+    assert {level.value for level in SecurityLevel} == {"block", "allow", "gate"}
+    assert RULE_LEVELS == frozenset({SecurityLevel.BLOCK, SecurityLevel.ALLOW})
 
 
 # ---------------------------------------------------------------------------
@@ -61,20 +56,6 @@ async def _seed_sample_rules(session: AsyncSession) -> None:
             enabled=True,
         ),
         SecurityRule(
-            pattern=r"\bsudo\b",
-            level="confirm",
-            priority=20,
-            description="Confirm sudo",
-            enabled=True,
-        ),
-        SecurityRule(
-            pattern=r"\bcurl\b",
-            level="warn",
-            priority=30,
-            description="Warn on curl",
-            enabled=True,
-        ),
-        SecurityRule(
             pattern=r"^ls\b",
             level="allow",
             priority=40,
@@ -102,28 +83,6 @@ async def test_evaluate_block(guard_db_session):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_confirm(guard_db_session):
-    """A command matching a CONFIRM rule must require confirmation."""
-    await _seed_sample_rules(guard_db_session)
-    guard = CommandGuard()
-    decision = await guard.evaluate("sudo apt-get update", "node1", guard_db_session)
-    assert decision.level == SecurityLevel.CONFIRM
-    assert decision.matched_rule is not None
-
-
-@pytest.mark.asyncio
-async def test_evaluate_warn(guard_db_session):
-    """A command matching a WARN rule must emit a warning."""
-    await _seed_sample_rules(guard_db_session)
-    guard = CommandGuard()
-    decision = await guard.evaluate(
-        "curl https://example.com", "node1", guard_db_session
-    )
-    assert decision.level == SecurityLevel.WARN
-    assert decision.matched_rule is not None
-
-
-@pytest.mark.asyncio
 async def test_evaluate_allow(guard_db_session):
     """A command matching an ALLOW rule must be allowed."""
     await _seed_sample_rules(guard_db_session)
@@ -134,38 +93,27 @@ async def test_evaluate_allow(guard_db_session):
 
 
 @pytest.mark.asyncio
-async def test_no_match_defaults_to_allow(guard_db_session):
-    """A command that matches no rule must default to ALLOW."""
+async def test_no_match_defaults_to_gate(guard_db_session):
+    """A command that matches no rule must default to GATE (fail closed)."""
     await _seed_sample_rules(guard_db_session)
     guard = CommandGuard()
     decision = await guard.evaluate("echo hello", "node1", guard_db_session)
-    assert decision.level == SecurityLevel.ALLOW
+    assert decision.level == SecurityLevel.GATE
     assert decision.matched_rule is None
 
 
 @pytest.mark.asyncio
-async def test_bypass_patterns_skip_confirm_but_not_block(guard_db_session):
-    """bypass_patterns can skip CONFIRM, but BLOCK is never bypassed."""
+async def test_evaluate_has_no_bypass_parameter(guard_db_session):
+    """The bypass-pattern path is gone: evaluate takes no bypass_patterns."""
+    import inspect
+
     await _seed_sample_rules(guard_db_session)
     guard = CommandGuard()
+    sig = inspect.signature(guard.evaluate)
+    assert "bypass_patterns" not in sig.parameters
 
-    # CONFIRM bypassed — should skip to default ALLOW
-    decision = await guard.evaluate(
-        "sudo apt-get update",
-        "node1",
-        guard_db_session,
-        bypass_patterns=[r"\bsudo\b"],
-    )
-    assert decision.level == SecurityLevel.ALLOW
-
-    # BLOCK NOT bypassed even when pattern listed
-    decision = await guard.evaluate(
-        "rm -rf /home",
-        "node1",
-        guard_db_session,
-        bypass_patterns=[r"rm\s+-rf\s+/"],
-    )
-    assert decision.level == SecurityLevel.BLOCK
+    decision = await guard.evaluate("sudo apt-get update", "node1", guard_db_session)
+    assert decision.level == SecurityLevel.GATE
 
 
 @pytest.mark.asyncio
@@ -183,7 +131,7 @@ async def test_disabled_rule_ignored(guard_db_session):
 
     guard = CommandGuard()
     decision = await guard.evaluate("echo hello", "node1", guard_db_session)
-    assert decision.level == SecurityLevel.ALLOW
+    assert decision.level == SecurityLevel.GATE
 
 
 @pytest.mark.asyncio
@@ -201,7 +149,28 @@ async def test_invalid_regex_skipped(guard_db_session):
 
     guard = CommandGuard()
     decision = await guard.evaluate("anything", "node1", guard_db_session)
-    assert decision.level == SecurityLevel.ALLOW
+    assert decision.level == SecurityLevel.GATE
+
+
+@pytest.mark.asyncio
+async def test_unknown_level_rule_skipped(guard_db_session):
+    """Legacy rule levels (review/confirm/warn) are skipped, never reinterpreted."""
+    guard_db_session.add_all(
+        [
+            SecurityRule(
+                pattern=r"\bsudo\b", level="review", priority=1, enabled=True
+            ),
+            SecurityRule(
+                pattern=r"\bsudo\b", level="confirm", priority=2, enabled=True
+            ),
+            SecurityRule(pattern=r"curl", level="warn", priority=3, enabled=True),
+        ]
+    )
+    await guard_db_session.commit()
+
+    guard = CommandGuard()
+    decision = await guard.evaluate("sudo curl http://x", "node1", guard_db_session)
+    assert decision.level == SecurityLevel.GATE
 
 
 @pytest.mark.asyncio
@@ -209,9 +178,9 @@ async def test_node_specific_overrides_global(guard_db_session):
     """A node-specific rule should override a global rule with the same pattern."""
     global_rule = SecurityRule(
         pattern=r"\bsudo\b",
-        level="confirm",
+        level="block",
         priority=10,
-        description="Global confirm sudo",
+        description="Global block sudo",
         enabled=True,
         node_id=None,
     )
@@ -231,79 +200,17 @@ async def test_node_specific_overrides_global(guard_db_session):
     assert decision.level == SecurityLevel.ALLOW
 
 
-# ---------------------------------------------------------------------------
-# ConfirmTokenStore tests
-# ---------------------------------------------------------------------------
-
-
-def test_token_create_and_validate():
-    """A freshly created token must validate successfully."""
-    store = ConfirmTokenStore()
-    token = store.create("sudo reboot", "node42")
-    assert store.validate(token, "sudo reboot", "node42") is True
-
-
-def test_token_is_one_time():
-    """A token must not be valid after it has been consumed once."""
-    store = ConfirmTokenStore()
-    token = store.create("sudo reboot", "node42")
-    assert store.validate(token, "sudo reboot", "node42") is True
-    assert store.validate(token, "sudo reboot", "node42") is False
-
-
-def test_token_wrong_command():
-    """A token must not validate if the command differs."""
-    store = ConfirmTokenStore()
-    token = store.create("sudo reboot", "node42")
-    assert store.validate(token, "sudo halt", "node42") is False
-
-
-def test_token_wrong_node():
-    """A token must not validate if the node_id differs."""
-    store = ConfirmTokenStore()
-    token = store.create("sudo reboot", "node42")
-    assert store.validate(token, "sudo reboot", "node99") is False
-
-
-def test_token_expired():
-    """A token used after its TTL must not validate."""
-    store = ConfirmTokenStore(ttl=0.01)  # 10 ms TTL
-    token = store.create("sudo reboot", "node42")
-    time.sleep(0.05)
-    assert store.validate(token, "sudo reboot", "node42") is False
-
-
-def test_token_store_cleanup_when_many_entries(monkeypatch):
-    """Expired entries should be pruned once the store grows past the threshold."""
-    store = ConfirmTokenStore(ttl=0.01)
-    monkeypatch.setattr(
-        "shuttle.core.security._CLEANUP_THRESHOLD",
-        3,
-    )
-    for i in range(4):
-        tok = store.create(f"cmd-{i}", "n")
-        store._store[tok] = (f"cmd-{i}", "n", time.monotonic() - 1.0)
-    store.create("fresh", "n")
-    assert len(store._store) == 1
-    assert any(v[0] == "fresh" for v in store._store.values())
-
-
 @pytest.mark.asyncio
 async def test_evaluate_skips_overlong_regex_pattern(guard_db_session):
     """Patterns longer than 500 chars are ignored (ReDoS guard)."""
     long_pat = "x" * 501
     guard_db_session.add(
-        SecurityRule(
-            pattern=long_pat,
-            level="block",
-            priority=1,
-            enabled=True,
-        )
+        SecurityRule(pattern=long_pat, level="block", priority=1, enabled=True)
     )
     await guard_db_session.commit()
     guard = CommandGuard()
     decision = await guard.evaluate("xxx", "node1", guard_db_session)
-    assert decision.level == SecurityLevel.ALLOW
+    assert decision.level == SecurityLevel.GATE
 
 
 @pytest.mark.asyncio
@@ -313,7 +220,7 @@ async def test_evaluate_duplicate_pattern_prefers_node_specific(guard_db_session
         [
             SecurityRule(
                 pattern=r"^uniquepat\b",
-                level="warn",
+                level="allow",
                 priority=5,
                 enabled=True,
                 node_id=None,

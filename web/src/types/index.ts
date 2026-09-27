@@ -93,7 +93,9 @@ export interface CommandLogResponse {
   stdout: string | null;
   stderr: string | null;
   security_level: string | null;
-  bypassed: boolean;
+  security_rule_id: string | null;
+  gate_score: number | null;
+  gate_reason: string | null;
   duration_ms: number | null;
   executed_at: string;
 }
@@ -103,6 +105,33 @@ export interface LogListResponse {
   total: number;
   page: number;
   page_size: number;
+}
+
+// ── Holds ──────────────────────────────────────────
+
+export interface HoldResponse {
+  id: string;
+  conversation_key: string;
+  client_id: string | null;
+  node_id: string;
+  node_name: string | null;
+  command: string;
+  gate_score: number | null;
+  status: string;
+  operator: string | null;
+  denial_note: string | null;
+  created_at: string;
+  expires_at: string;
+  decided_at: string | null;
+  executed_at: string | null;
+  exit_code: number | null;
+  stdout: string | null;
+  recent_commands: CommandLogResponse[];
+}
+
+export interface HoldDecisionRequest {
+  operator?: string;
+  note?: string | null;
 }
 
 // ── Settings ───────────────────────────────────────

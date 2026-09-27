@@ -1,14 +1,13 @@
-"""Command security primitives: SecurityLevel, CommandGuard, ConfirmTokenStore."""
+"""Command security primitives: SecurityLevel, CommandGuard."""
 
 from __future__ import annotations
 
 import re
-import secrets
-import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from loguru import logger
 from sqlalchemy import select
 
 if TYPE_CHECKING:
@@ -16,12 +15,19 @@ if TYPE_CHECKING:
 
 
 class SecurityLevel(str, Enum):
-    """Severity levels used when evaluating a command against security rules."""
+    """Disposition after CommandGuard.evaluate().
+
+    ``block`` / ``allow`` are the only valid *rule* levels. ``gate`` is the
+    fail-closed default when nothing matches — never stored on a rule row.
+    """
 
     BLOCK = "block"
-    CONFIRM = "confirm"
-    WARN = "warn"
     ALLOW = "allow"
+    GATE = "gate"
+
+
+# Levels an operator may put on a SecurityRule row.
+RULE_LEVELS = frozenset({SecurityLevel.BLOCK, SecurityLevel.ALLOW})
 
 
 @dataclass
@@ -31,56 +37,6 @@ class SecurityDecision:
     level: SecurityLevel
     matched_rule: str | None = None
     message: str = ""
-
-
-# ---------------------------------------------------------------------------
-# ConfirmTokenStore
-# ---------------------------------------------------------------------------
-
-_CLEANUP_THRESHOLD = 100
-
-
-class ConfirmTokenStore:
-    """In-memory store for one-time confirmation tokens with TTL.
-
-    Tokens are generated per (command, node_id) pair.  Validating a token
-    consumes it (one-time use).  Expired tokens are pruned lazily when the
-    store grows beyond *_CLEANUP_THRESHOLD* entries.
-    """
-
-    def __init__(self, ttl: float = 300.0) -> None:
-        self._ttl = ttl
-        # token -> (command, node_id, expires_at)
-        self._store: dict[str, tuple[str, str, float]] = {}
-
-    def _maybe_cleanup(self) -> None:
-        """Remove expired tokens if the store is getting large."""
-        if len(self._store) > _CLEANUP_THRESHOLD:
-            now = time.monotonic()
-            expired = [t for t, (_, _, exp) in self._store.items() if exp <= now]
-            for t in expired:
-                del self._store[t]
-
-    def create(self, command: str, node_id: str) -> str:
-        """Create and store a one-time token for the given (command, node_id)."""
-        self._maybe_cleanup()
-        token = secrets.token_urlsafe(32)
-        self._store[token] = (command, node_id, time.monotonic() + self._ttl)
-        return token
-
-    def validate(self, token: str, command: str, node_id: str) -> bool:
-        """Validate *and consume* a token.  Returns False if missing, expired, or mismatched."""
-        entry = self._store.get(token)
-        if entry is None:
-            return False
-        stored_command, stored_node_id, expires_at = entry
-        # Always consume the token regardless of outcome
-        del self._store[token]
-        if time.monotonic() > expires_at:
-            return False
-        return secrets.compare_digest(
-            stored_command, command
-        ) and secrets.compare_digest(stored_node_id, node_id)
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +52,6 @@ class CommandGuard:
         command: str,
         node_id: str,
         db_session: AsyncSession,
-        bypass_patterns: list[str] | None = None,
     ) -> SecurityDecision:
         """Evaluate *command* against security rules fetched from the database.
 
@@ -108,13 +63,12 @@ class CommandGuard:
             Identifier of the target node.
         db_session:
             An async SQLAlchemy session used to query rules.
-        bypass_patterns:
-            A list of rule pattern strings that should be skipped
-            (unless the rule is BLOCK).
 
         Returns
         -------
         SecurityDecision
+            First matching rule wins (by priority). No match → GATE
+            (LLM gate). Only an explicit allow rule bypasses the gate.
         """
         from shuttle.db.models import SecurityRule
 
@@ -138,8 +92,6 @@ class CommandGuard:
             else:
                 seen_patterns[rule.pattern] = rule
 
-        bypassed = set(bypass_patterns or [])
-
         for rule in sorted(seen_patterns.values(), key=lambda r: r.priority):
             try:
                 # Limit pattern length to prevent ReDoS
@@ -147,14 +99,18 @@ class CommandGuard:
                     continue
                 compiled = re.compile(rule.pattern)
                 if compiled.search(command):
-                    level = SecurityLevel(rule.level)
-                    if level == SecurityLevel.BLOCK:
-                        return SecurityDecision(
-                            level=level,
-                            matched_rule=rule.id,
-                            message=f"BLOCKED: {rule.description or rule.pattern}",
+                    try:
+                        level = SecurityLevel(rule.level)
+                    except ValueError:
+                        level = None
+                    # Only block/allow are rule levels. Legacy review/confirm/warn
+                    # (and bare "gate") are skipped — never reinterpreted.
+                    if level not in RULE_LEVELS:
+                        logger.warning(
+                            "Skipping rule {id} with unknown level {level!r}",
+                            id=rule.id,
+                            level=rule.level,
                         )
-                    if rule.pattern in bypassed:
                         continue
                     return SecurityDecision(
                         level=level,
@@ -164,4 +120,5 @@ class CommandGuard:
             except re.error:
                 continue
 
-        return SecurityDecision(level=SecurityLevel.ALLOW)
+        # Fail closed: unmatched → LLM gate.
+        return SecurityDecision(level=SecurityLevel.GATE)

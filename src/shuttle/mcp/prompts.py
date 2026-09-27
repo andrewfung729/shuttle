@@ -27,7 +27,7 @@ def register_prompts(
 
         Evaluates the command against all active security rules and returns
         a detailed assessment — which rules match, what security level applies,
-        and whether confirmation will be needed.
+        and whether the command will run.
         """
         from shuttle.db.repository import RuleRepo
 
@@ -64,30 +64,32 @@ def register_prompts(
                 f"## Command Safety Check\n\n"
                 f"**Command**: `{command}`\n"
                 f"**Node**: {node or '(auto-select)'}\n"
-                f"**Result**: ✅ ALLOW — no security rules matched.\n\n"
-                "You can proceed with `ssh_run(command=...)`."
+                f"**Result**: ⚖️ GATE — no security rules matched; the LLM gate decides.\n\n"
+                "Call `ssh_run(command=...)` and read the result:\n"
+                "- command output — it ran;\n"
+                "- `Error: denied by policy` — replan; do not probe with variants;\n"
+                "- `Error: awaiting operator` — a human may still allow this exact "
+                "command; retry the identical bytes later.\n\n"
+                "The operator has two actions in the Shuttle panel: **run once** "
+                "for this exact command, or **deny** with an optional note. There "
+                "is no way to approve a command from here."
             )
 
         lines = []
         highest_level = "ALLOW"
-        level_order = {"BLOCK": 3, "CONFIRM": 2, "WARN": 1, "ALLOW": 0}
+        level_order = {"BLOCK": 3, "ALLOW": 0}
         for r in matching:
             lines.append(
                 f"  • [{r.level}] pattern=`{r.pattern}` — {r.description or 'no description'}"
             )
-            if level_order.get(r.level, 0) > level_order.get(highest_level, 0):
-                highest_level = r.level
+            if level_order.get(r.level.upper(), 0) > level_order.get(highest_level, 0):
+                highest_level = r.level.upper()
 
-        icon = {"BLOCK": "⛔", "CONFIRM": "⚠️", "WARN": "⚡"}.get(highest_level, "✅")
+        icon = {"BLOCK": "⛔"}.get(highest_level, "✅")
 
         advice = {
-            "BLOCK": "This command will be rejected. Rephrase or use an alternative approach.",
-            "CONFIRM": (
-                "This command requires confirmation. Call ssh_run() first to get a "
-                "confirm_token, then call ssh_run() again with that token."
-            ),
-            "WARN": "This command is allowed but will be logged with a warning. Proceed if intended.",
-        }.get(highest_level, "Proceed normally.")
+            "BLOCK": "This command will be denied. Rephrase or use an alternative approach.",
+        }.get(highest_level, "Proceed normally (explicit allow rule).")
 
         return (
             f"## Command Safety Check\n\n"
@@ -123,8 +125,7 @@ def register_prompts(
 
         session_info = (
             f"  Session ID: {node_session.session_id}\n"
-            f"  Working directory: {node_session.working_directory}\n"
-            f"  Bypassed rules: {list(node_session.bypass_patterns) or 'none'}"
+            f"  Working directory: {node_session.working_directory}"
             if node_session
             else "  No active session (will be auto-created on first ssh_run)"
         )

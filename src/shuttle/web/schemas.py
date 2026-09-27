@@ -60,7 +60,7 @@ class NodeTestResult(BaseModel):
 
 class RuleCreate(BaseModel):
     pattern: str = Field(..., min_length=1)
-    level: str = Field(..., pattern=r"^(block|confirm|warn|allow)$")
+    level: str = Field(..., pattern=r"^(block|allow)$")
     node_id: str | None = None
     description: str | None = None
     priority: int = 0
@@ -70,7 +70,7 @@ class RuleCreate(BaseModel):
 
 class RuleUpdate(BaseModel):
     pattern: str | None = None
-    level: str | None = Field(None, pattern=r"^(block|confirm|warn|allow)$")
+    level: str | None = Field(None, pattern=r"^(block|allow)$")
     node_id: str | None = None
     description: str | None = None
     priority: int | None = None
@@ -123,7 +123,9 @@ class CommandLogResponse(BaseModel):
     stdout: str | None
     stderr: str | None
     security_level: str | None
-    bypassed: bool
+    security_rule_id: str | None = None
+    gate_score: float | None = None
+    gate_reason: str | None = None
     duration_ms: int | None
     executed_at: datetime
 
@@ -135,6 +137,34 @@ class LogListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+# ── Holds ──────────────────────────────────────────
+
+
+class HoldResponse(BaseModel):
+    id: str
+    conversation_key: str
+    client_id: str | None = None
+    node_id: str
+    node_name: str | None = None
+    command: str
+    gate_score: float | None = None
+    status: str
+    operator: str | None = None
+    denial_note: str | None = None
+    created_at: datetime
+    expires_at: datetime
+    decided_at: datetime | None = None
+    executed_at: datetime | None = None
+    exit_code: int | None = None
+    stdout: str | None = None
+    recent_commands: list[CommandLogResponse] = Field(default_factory=list)
+
+
+class HoldDecisionRequest(BaseModel):
+    operator: str = Field("operator", min_length=1, max_length=255)
+    note: str | None = Field(None, max_length=500)
 
 
 # ── Settings ───────────────────────────────────────

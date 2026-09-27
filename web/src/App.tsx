@@ -8,6 +8,7 @@ import Login from "./pages/Login";
 import Overview from "./pages/Overview";
 import Activity from "./pages/Activity";
 import Rules from "./pages/Rules";
+import Holds from "./pages/Holds";
 import Settings from "./pages/Settings";
 
 export default function App() {
@@ -32,6 +33,7 @@ export default function App() {
         <Route element={<Layout />}>
           <Route path="/" element={<Overview />} />
           <Route path="/nodes/:nodeId" element={<Activity />} />
+          <Route path="/holds" element={<Holds />} />
           <Route path="/rules" element={<Rules />} />
           <Route path="/settings" element={<Settings />} />
         </Route>

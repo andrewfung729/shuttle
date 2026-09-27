@@ -16,6 +16,8 @@ import type {
   StatsResponse,
   SettingsResponse,
   SettingsUpdate,
+  HoldResponse,
+  HoldDecisionRequest,
 } from "../types";
 
 // ── Fetch wrapper ──────────────────────────────────
@@ -250,6 +252,53 @@ export function useLogs(params?: LogParams) {
       if (params?.until) search.set("until", params.until);
       const qs = search.toString();
       return apiFetch(`/logs${qs ? `?${qs}` : ""}`);
+    },
+  });
+}
+
+// ── Holds ──────────────────────────────────────────
+
+export function useHolds(status?: string) {
+  return useQuery<HoldResponse[]>({
+    queryKey: ["holds", status] as const,
+    queryFn: () =>
+      apiFetch(
+        `/holds${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+      ),
+    refetchInterval: 3000,
+  });
+}
+
+export function useRunHold() {
+  const qc = useQueryClient();
+  return useMutation<HoldResponse, Error, string>({
+    mutationFn: (id) =>
+      apiFetch(`/holds/${id}/run`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["holds"] });
+      void qc.invalidateQueries({ queryKey: ["logs"] });
+    },
+  });
+}
+
+export function useDenyHold() {
+  const qc = useQueryClient();
+  return useMutation<
+    HoldResponse,
+    Error,
+    { id: string; body: HoldDecisionRequest }
+  >({
+    mutationFn: ({ id, body }) =>
+      apiFetch(`/holds/${id}/deny`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["holds"] });
+      void qc.invalidateQueries({ queryKey: ["logs"] });
     },
   });
 }

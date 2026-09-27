@@ -24,7 +24,7 @@ Cursor spawns Shuttle as a child process. Use **`command` + `args`** (do not use
 
 **Cursor Settings → MCP:** Command = `uvx`, arguments = `shuttle-mcp`. On very old PyPI wheels, use `--from`, `shuttle-mcp`, `shuttle`.
 
-After nodes exist (`shuttle node add`), restart Cursor and ask the AI to use Shuttle tools (e.g. `ssh_list_nodes`).
+After nodes exist (`shuttle node add`), restart Cursor and ask the AI to use Shuttle tools (e.g. `ssh_run`).
 
 ## streamable-http (`shuttle serve`)
 

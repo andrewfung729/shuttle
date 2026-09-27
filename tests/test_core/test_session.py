@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -84,25 +85,7 @@ def test_ssh_session_creation():
     assert session.node_id == "prod-web"
     assert session.working_directory == "~"
     assert session.status == SessionStatus.ACTIVE
-    assert session.bypass_patterns == set()
     assert session.env_vars == {}
-
-
-def test_ssh_session_bypass_patterns():
-    session = SSHSession(session_id="s1", node_id="node-1")
-    session.bypass_patterns.add(r"rm -rf")
-    session.bypass_patterns.add(r"sudo")
-    assert r"rm -rf" in session.bypass_patterns
-    assert r"sudo" in session.bypass_patterns
-    assert len(session.bypass_patterns) == 2
-
-
-def test_ssh_session_bypass_patterns_independence():
-    """Two sessions should have independent bypass_patterns sets."""
-    s1 = SSHSession(session_id="s1", node_id="n")
-    s2 = SSHSession(session_id="s2", node_id="n")
-    s1.bypass_patterns.add("rm")
-    assert "rm" not in s2.bypass_patterns
 
 
 def test_ssh_session_env_vars():
@@ -115,9 +98,49 @@ def test_ssh_session_env_vars():
 # ---------------------------------------------------------------------------
 
 
-def test_wrap_command_simple():
-    result = _wrap_command("ls -la", "/home/user")
-    assert result == f"cd /home/user && ls -la; echo {PWD_SENTINEL}; pwd"
+def _run_wrapped(command: str, cwd: str) -> subprocess.CompletedProcess:
+    """Run the wrapped command through a real POSIX shell.
+
+    The wrapper's external behavior is what a shell does with it, so the
+    contract (exit status, stdout, working directory) is asserted by running
+    it rather than by matching the generated string.
+    """
+    return subprocess.run(
+        ["/bin/sh", "-c", _wrap_command(command, cwd)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+def test_wrap_command_reports_success_for_a_succeeding_command():
+    assert _run_wrapped("true", "/tmp").returncode == 0
+
+
+def test_wrap_command_reports_the_commands_exit_status():
+    assert _run_wrapped("false", "/tmp").returncode == 1
+    assert _run_wrapped("definitely_not_a_command_xyz", "/tmp").returncode == 127
+
+
+def test_wrap_command_reports_failure_and_no_pwd_when_directory_missing():
+    """An unenterable working directory must not clobber the tracked cwd."""
+    cp = _run_wrapped("echo never-runs", "/definitely/missing/dir/xyz")
+    assert cp.returncode != 0
+    assert PWD_SENTINEL not in cp.stdout
+    assert cp.stdout == ""
+
+
+def test_wrap_command_emits_stdout_and_working_directory():
+    cp = _run_wrapped("echo wrapped-out", "/tmp")
+    stdout, pwd = _parse_sentinel_output(cp.stdout)
+    assert stdout == "wrapped-out"
+    assert pwd  # a working directory was reported
+
+
+def test_wrap_command_preserves_a_changed_working_directory():
+    cp = _run_wrapped("cd /usr && true", "/tmp")
+    _, pwd = _parse_sentinel_output(cp.stdout)
+    assert pwd == "/usr"
 
 
 def test_wrap_command_quotes_directory_with_spaces():
@@ -136,7 +159,6 @@ def test_wrap_command_quotes_directory_with_special_chars():
 def test_wrap_command_includes_sentinel():
     result = _wrap_command("pwd", "/tmp")
     assert f"echo {PWD_SENTINEL}" in result
-    assert result.endswith("; pwd")
 
 
 def test_wrap_command_plain_path_not_quoted():
@@ -328,7 +350,7 @@ async def test_execute_keeps_working_directory_when_sentinel_has_no_pwd():
 @pytest.mark.asyncio
 async def test_persist_hooks_noop_without_db_factory():
     pool = make_mock_pool()
-    manager = SessionManager(pool=pool, db_session_factory=None)
+    manager = SessionManager(pool=pool)
     session = await manager.create("node-1")
     await manager.execute(session.session_id, "echo")
     await manager.close(session.session_id)

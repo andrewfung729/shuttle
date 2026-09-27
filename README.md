@@ -25,7 +25,7 @@ ______________________________________________________________________
 
 When AI coding assistants need to operate remote servers (run tests on GPU machines, deploy to staging, check logs), they need a secure bridge. Shuttle provides:
 
-- **🔐 4-Level Command Security** — Block dangerous commands, require confirmation for risky ones, warn on installs, allow the rest
+- **🔐 Block / allow rules + LLM Gate** — Block destructive commands, score the rest, and park uncertain commands as Holds for an operator
 - **🔄 Connection Pooling** — Reuse SSH connections across commands, no repeated handshakes
 - **📦 Session Isolation** — Each AI conversation gets its own working directory context
 - **🌐 Web Audit Panel** — See every command the AI ran, per node, with full stdout/stderr
@@ -106,13 +106,14 @@ Both modes share the same SQLite database — commands logged in CLI mode are vi
 
 AI assistants get these tools automatically:
 
-| Tool             | Description                                            |
-| ---------------- | ------------------------------------------------------ |
-| `ssh_run`        | Run a command on a remote node (sessions auto-managed) |
-| `ssh_upload`     | Upload a file via SFTP                                 |
-| `ssh_download`   | Download a file via SFTP                               |
-| `ssh_list_nodes` | List all configured nodes                              |
-| `ssh_add_node`   | Add a new SSH node                                     |
+| Tool           | Description                                            |
+| -------------- | ------------------------------------------------------ |
+| `ssh_run`      | Run a command on a remote node (sessions auto-managed) |
+| `ssh_upload`   | Upload a file via SFTP                                 |
+| `ssh_download` | Download a file via SFTP                               |
+| `ssh_add_node` | Add a new SSH node                                     |
+
+Nodes, rules, sessions, and recent logs are read-only MCP resources, not tools.
 
 ### Example conversation
 
@@ -128,23 +129,24 @@ AI:  Training started. Epoch 1/10... (working directory preserved automatically)
 
 ## Security Rules
 
-Commands are evaluated against a 4-level security system:
+Rules are `block` or `allow` only; anything unmatched is scored by the LLM gate:
 
-| Level          | Behavior                     | Example                       |
-| -------------- | ---------------------------- | ----------------------------- |
-| 🔴 **block**   | Rejected immediately         | `rm -rf /`, `mkfs`, fork bomb |
-| 🟡 **confirm** | Requires user confirmation   | `sudo`, `rm -rf`, `shutdown`  |
-| 🟠 **warn**    | Executes with warning logged | `apt install`, `pip install`  |
-| 🟢 **allow**   | Executes normally            | Everything else               |
+| Level / disposition | Behavior                                                              | Example                       |
+| ------------------- | --------------------------------------------------------------------- | ----------------------------- |
+| 🔴 **block** (rule) | Denied immediately (never calls the gate)                             | `rm -rf /`, `mkfs`, fork bomb |
+| 🟢 **allow** (rule) | Executes normally (never calls the gate)                              | Explicit allowlist entries    |
+| ⚖️ **gate** (default) | Score ≥ 0.9 executes; 0.3–0.9 parks a Hold for an operator; below 0.3 denies | `sudo`, `rm -rf`, `shutdown`  |
 
-Default rules are seeded on first startup. Customize via Web UI or directly in the database.
+The agent sees command output, `Error: denied by policy` (replan), or `Error: awaiting operator` (an operator may still allow this exact command — retry it), and denials are logged for operators with the gate score and reason. A Hold waits up to 20 seconds; if an operator decides in time, the output comes back inline.
+
+Enable the gate with `SHUTTLE_GATE_ENABLED=true` and `SHUTTLE_OPENROUTER_API_KEY=...`; with the gate off, unmatched commands deny (fail closed). Default rules are seeded on first startup. Customize via Web UI or directly in the database.
 
 ### Per-Node Overrides
 
 Different servers can have different rules:
 
 ```
-Global: sudo .* → confirm
+Global: unmatched commands → LLM gate (Hold if uncertain)
 GPU Server: sudo .* → allow (trusted environment)
 Prod Server: DROP TABLE → block (extra protection)
 ```
@@ -155,6 +157,7 @@ Start with `shuttle serve`, open `http://localhost:9876`:
 
 - **Overview** — Node cards with status, quick stats
 - **Activity** — Per-node command log (console-style, with stdout/stderr)
+- **Holds** — Run once or deny commands the gate scored as uncertain
 - **Security Rules** — Manage global defaults and per-node overrides
 - **Settings** — Connection pool and cleanup configuration
 

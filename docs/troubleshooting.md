@@ -77,7 +77,7 @@ Ensure `uvx shuttle-mcp --help` works, or run `uv tool install shuttle-mcp` and 
 
 ### Commands blocked unexpectedly
 
-**Symptom:** `ssh_run` returns "BLOCKED" for a command you expect to work.
+**Symptom:** `ssh_run` returns `Error: denied by policy` for a command you expect to work.
 
 **Solutions:**
 
@@ -86,14 +86,38 @@ Ensure `uvx shuttle-mcp --help` works, or run `uv tool install shuttle-mcp` and 
 1. Use the **Rule Tester** (Rules page → Test button) to see which rule matches
 1. Adjust or delete the overly broad rule
 
-### CONFIRM token flow
+### Every gated command is denied
 
-**Symptom:** Command returns "requires confirmation" with a token.
+**Symptom:** Unmatched commands (no block/allow rule) all return `Error: denied by policy`, and the Activity log shows reason `disabled`.
 
-This is expected for commands matching `confirm`-level rules (e.g., `sudo`, `rm -rf`). The AI should:
+This is the fail-closed default: the LLM gate is off. Enable it:
 
-1. Show the user the command and ask for confirmation
-1. Re-call `ssh_run` with the `confirm_token` parameter
+1. Set `SHUTTLE_OPENROUTER_API_KEY` (OpenRouter key, or point `SHUTTLE_GATE_BASE_URL` at any TypeSafe System One-compatible endpoint).
+1. Set `SHUTTLE_GATE_ENABLED=true` and restart `shuttle serve`.
+1. With the gate on but misconfigured (bad key, unreachable endpoint), denials log reason `error` instead.
+
+### Gate denies a command I consider safe
+
+**Symptom:** Activity log shows a gate denial with reason `unsafe` and a low score.
+
+1. The calibrated threshold is deliberately strict (0.9). Check the logged score — borderline commands (privilege changes especially) sit at 0.5-0.7 by design, which parks a **Hold** rather than denying.
+1. Use the **create allow rule** shortcut on the denied row to add an explicit allow rule for that command — a human-authored policy change, not a one-off unlock.
+1. Retrying the command later goes through the same path; a rule change makes it pass.
+
+### A command is stuck on `Error: awaiting operator`
+
+**Symptom:** `ssh_run` returned `Error: awaiting operator`, or the Holds page shows a pending Hold.
+
+The command scored in the uncertain band (0.3–0.9) and is waiting for an Operator decision. In the panel, open **Holds** and either **run once** (the exact command runs and the output is stored for the agent to collect by retrying the identical command) or **deny** (optionally with a note that the agent receives). A Hold that nobody decides expires after 15 minutes and becomes a denial. A pending Hold never blocks other commands on the same node.
+
+### The AI keeps retrying a denied command
+
+**Symptom:** The agent loops on `Error: denied by policy`.
+
+The fixed string carries no actionable detail, so a confused agent may retry. Retrying is harmless (each attempt just logs another denial), but the fix is policy: adjust the rules so the command passes, or tell the agent to take a different approach.
+
+1. If a pattern should never run at all, add a **block** rule instead of rejecting repeatedly.
+1. If the denial carried a Denial Note (`Error: denied by policy: <note>`), that note is the Operator's steering — have the agent follow it.
 
 ## Web Panel Issues
 

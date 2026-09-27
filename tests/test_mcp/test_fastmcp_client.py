@@ -8,10 +8,10 @@ DB logging through the real FastMCP protocol layer.
 from __future__ import annotations
 
 import json
-import re
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -21,12 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from shuttle.core.credentials import CredentialManager
-from shuttle.core.security import CommandGuard, ConfirmTokenStore
+from shuttle.core.security import CommandGuard
 from shuttle.core.session import SSHSession
 from shuttle.db.models import Base, CommandLog
 from shuttle.db.repository import NodeRepo, RuleRepo
 from shuttle.mcp.resources import register_resources
-from shuttle.mcp.tools import register_tools
+from shuttle.mcp.tools import DENIED_MESSAGE, register_tools
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -85,7 +85,6 @@ async def mcp_server(mock_pool, mock_session_mgr, db_factory, tmp_path):
     """Build a FastMCP server with real DB but mocked SSH."""
     mcp = FastMCP(name="shuttle-test")
     guard = CommandGuard()
-    token_store = ConfirmTokenStore()
     cred_mgr = CredentialManager(tmp_path)
 
     @asynccontextmanager
@@ -104,14 +103,23 @@ async def mcp_server(mock_pool, mock_session_mgr, db_factory, tmp_path):
             encrypted_credential="enc",
         )
 
+    class _SafeGate:
+        async def is_safe(self, state, instructions):
+            return 0.99
+
     register_tools(
         mcp=mcp,
         pool=mock_pool,
         guard=guard,
-        token_store=token_store,
+        gate=_SafeGate(),  # unmatched commands pass the gate in this fixture
         session_mgr=mock_session_mgr,
         db_session_ctx=db_session_ctx,
         node_repo_factory=NodeRepo,
+        settings=SimpleNamespace(
+            gate_enabled=True,
+            openrouter_api_key="sk-or-test",
+            gate_safe_instructions="be strict",
+        ),
         cred_mgr=cred_mgr,
     )
     register_resources(
@@ -194,8 +202,8 @@ async def test_list_nodes_via_client(mcp_server):
 
 
 @pytest.mark.asyncio
-async def test_run_allowed_command_via_client(mcp_server_with_session):
-    """ALLOW-level command executes and returns output through Client."""
+async def test_run_gated_safe_command_via_client(mcp_server_with_session):
+    """Unmatched command + safe gate score executes and returns output."""
     async with Client(mcp_server_with_session) as client:
         result = await client.call_tool(
             "ssh_run", {"command": "hostname", "node": "test-node"}
@@ -207,7 +215,7 @@ async def test_run_allowed_command_via_client(mcp_server_with_session):
 
 @pytest.mark.asyncio
 async def test_run_blocked_command_via_client(mcp_server_with_session, db_factory):
-    """A command matching a BLOCK rule returns BLOCKED through Client."""
+    """A command matching a BLOCK rule returns the fixed denial string."""
     async with db_factory() as sess:
         rule_repo = RuleRepo(sess)
         await rule_repo.create(
@@ -223,40 +231,147 @@ async def test_run_blocked_command_via_client(mcp_server_with_session, db_factor
         )
 
     text = _result_text(result)
-    assert "BLOCKED" in text
+    assert text == DENIED_MESSAGE
 
 
 @pytest.mark.asyncio
-async def test_run_confirm_flow_via_client(mcp_server_with_session, db_factory):
-    """CONFIRM-level command returns token request, re-call with token executes."""
+async def test_run_unmatched_command_denied_when_gate_off(
+    tmp_path, db_factory, mock_pool, mock_session_mgr
+):
+    """Unmatched command with gate disabled: fixed denial."""
+    from shuttle.core.credentials import CredentialManager
+
+    mcp = FastMCP(name="gate-off")
+    session = SSHSession(session_id="s1", node_id="test-node")
+    mock_session_mgr.list_active.return_value = [session]
+
+    @asynccontextmanager
+    async def db_session_ctx():
+        async with db_factory() as sess:
+            yield sess
+
     async with db_factory() as sess:
-        rule_repo = RuleRepo(sess)
-        await rule_repo.create(
-            pattern=r"^sudo\b",
-            level="confirm",
-            description="Confirm sudo",
-            priority=0,
+        await NodeRepo(sess).create(
+            name="test-node",
+            host="10.0.0.1",
+            username="root",
+            auth_type="password",
+            encrypted_credential="enc",
         )
 
-    async with Client(mcp_server_with_session) as client:
-        result1 = await client.call_tool(
+    register_tools(
+        mcp=mcp,
+        pool=mock_pool,
+        guard=CommandGuard(),
+        gate=None,
+        session_mgr=mock_session_mgr,
+        db_session_ctx=db_session_ctx,
+        node_repo_factory=NodeRepo,
+        settings=SimpleNamespace(
+            gate_enabled=False,
+            openrouter_api_key=None,
+            gate_safe_instructions="be strict",
+        ),
+        cred_mgr=CredentialManager(tmp_path),
+    )
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
             "ssh_run", {"command": "sudo ls", "node": "test-node"}
         )
-        text1 = _result_text(result1)
-        assert "confirm_token" in text1
 
-        import re
+    assert _result_text(result) == DENIED_MESSAGE
 
-        match = re.search(r'confirm_token="([^"]+)"', text1)
-        assert match, f"Could not find confirm_token in: {text1}"
-        token = match.group(1)
 
-        result2 = await client.call_tool(
-            "ssh_run",
-            {"command": "sudo ls", "node": "test-node", "confirm_token": token},
+@pytest.mark.asyncio
+async def test_run_gate_pass_via_client(
+    tmp_path, db_factory, mock_pool, mock_session_mgr
+):
+    """Protocol-level: unmatched + stub gate score >= threshold executes and logs."""
+    from shuttle.core.credentials import CredentialManager
+    from shuttle.core.session import SSHSession
+
+    session = SSHSession(session_id="s1", node_id="test-node")
+    mock_session_mgr.list_active.return_value = [session]
+    mock_session_mgr.execute = AsyncMock(
+        return_value={
+            "stdout": "gate passed",
+            "exit_status": 0,
+            "working_directory": "/",
+        }
+    )
+
+    mcp = FastMCP(name="gate-test")
+    guard = CommandGuard()
+
+    class StubGate:
+        async def is_safe(self, state, instructions):
+            return 0.95
+
+    @asynccontextmanager
+    async def db_session_ctx():
+        async with db_factory() as sess:
+            yield sess
+
+    async with db_factory() as sess:
+        await NodeRepo(sess).create(
+            name="test-node",
+            host="10.0.0.1",
+            username="root",
+            auth_type="password",
+            encrypted_credential="enc",
         )
-        text2 = _result_text(result2)
-        assert "mocked output" in text2
+
+    register_tools(
+        mcp=mcp,
+        pool=mock_pool,
+        guard=guard,
+        gate=StubGate(),
+        session_mgr=mock_session_mgr,
+        db_session_ctx=db_session_ctx,
+        node_repo_factory=NodeRepo,
+        settings=SimpleNamespace(
+            gate_enabled=True,
+            openrouter_api_key="sk-or-test",
+            gate_safe_instructions="be strict",
+        ),
+        cred_mgr=CredentialManager(tmp_path),
+    )
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "ssh_run", {"command": "sudo uptime", "node": "test-node"}
+        )
+
+    assert "gate passed" in _result_text(result)
+
+    from sqlalchemy import select
+
+    async with db_factory() as sess:
+        logs = list((await sess.execute(select(CommandLog))).scalars().all())
+    assert logs[-1].gate_score == 0.95
+    assert logs[-1].gate_reason is None
+
+
+@pytest.mark.asyncio
+async def test_ssh_run_rejects_old_approval_params(mcp_server_with_session):
+    """No claim, bypass, or story parameter survives on the tool surface."""
+    async with Client(mcp_server_with_session) as client:
+        tools = await client.list_tools()
+        ssh_run_tool = next(t for t in tools if t.name == "ssh_run")
+        props = ssh_run_tool.inputSchema.get("properties", {})
+        assert set(props) == {"command", "node", "timeout"}
+        assert not set(props) & {
+            "approval_id",
+            "approval_wait",
+            "confirm_token",
+            "bypass_scope",
+            "purpose",
+        }
+        # The description defines the two fixed strings ahead of time.
+        description = ssh_run_tool.description or ""
+        assert "denied by policy" in description
+        assert "awaiting operator" in description
 
 
 # ---------------------------------------------------------------------------
@@ -280,9 +395,12 @@ async def test_run_persists_log_to_real_db(mcp_server_with_session, db_factory):
     log = logs[-1]
     assert log.command == "whoami"
     assert log.exit_code == 0
-    assert log.security_level == "allow"
+    assert log.security_level == "gate"
     assert log.duration_ms is not None
     assert log.duration_ms >= 0
+    # Identity is derived from the MCP context, not the stdio fallback.
+    assert log.conversation_key
+    assert not log.conversation_key.startswith("local-")
 
 
 @pytest.mark.asyncio
@@ -351,7 +469,9 @@ async def test_add_node_inline_secrets_rejected(mcp_server):
 async def test_add_node_key_path_via_client(mcp_server, mock_pool, db_factory):
     """private_key_path is read server-side; key content never returned to agent."""
     with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as f:
-        f.write("-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE-KEY-CONTENT\n-----END OPENSSH PRIVATE KEY-----\n")
+        f.write(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE-KEY-CONTENT\n-----END OPENSSH PRIVATE KEY-----\n"
+        )
         key_path = f.name
 
     async with Client(mcp_server) as client:

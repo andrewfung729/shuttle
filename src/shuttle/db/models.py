@@ -7,11 +7,13 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -159,7 +161,15 @@ class CommandLog(Base):
     stderr: Mapped[str | None] = mapped_column(Text, nullable=True)
     security_level: Mapped[str | None] = mapped_column(String(50), nullable=True)
     security_rule_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    bypassed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Server-derived MCP conversation that requested the command. Lets the
+    # panel show recent context for a Hold. Never supplied by the agent.
+    conversation_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # LLM-gate audit metadata: score for gated decisions (denials and
+    # passes). Denial reasons: unsafe | error | disabled | capped | denied |
+    # expired (block is recorded in security_level). The execution reason
+    # is once for a run-once Hold execution.
+    gate_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gate_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     executed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -172,6 +182,62 @@ class CommandLog(Base):
         "Session", back_populates="command_logs"
     )
     node: Mapped["Node"] = relationship("Node", back_populates="command_logs")
+
+
+class Hold(Base):
+    """A parked exact command in the uncertain band awaiting one Operator decision.
+
+    A Hold is not an Approval: the requesting agent never receives its id,
+    score, band, or rule text. It is bound to the server-derived conversation
+    that requested it and matched on raw command bytes, and it is unique per
+    ``(conversation_key, node_id, command_hash)``.
+    """
+
+    __tablename__ = "holds"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_key",
+            "node_id",
+            "command_hash",
+            name="uq_holds_conversation_node_command",
+        ),
+        Index("ix_holds_status", "status"),
+        Index("ix_holds_conversation", "conversation_key"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    conversation_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Panel label only; identity is never agent-supplied.
+    client_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    node_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("nodes.id"), nullable=False
+    )
+    command: Mapped[str] = mapped_column(Text, nullable=False)
+    command_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    gate_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    operator: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    denial_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    executed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stdout: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    node: Mapped["Node"] = relationship("Node")
 
 
 class AppConfig(Base):

@@ -4,13 +4,20 @@ Design
 ------
 * ``SSHSession`` is a plain dataclass that holds all per-session state
   entirely in memory.
-* ``SessionManager`` wraps a ``ConnectionPool`` to run commands and an
-  optional ``db_session_factory`` for persistence.
+* ``SessionManager`` wraps a ``ConnectionPool`` to run commands.
+
+Invariant: ``mcp.tools._execute_command_logic`` is the single audit point for
+command execution — every executed command's CommandLog row is written there.
+No execution path may bypass it.
 * Every command is wrapped as::
 
-      cd <working_dir> && <command>; echo ---SHUTTLE_PWD---; pwd
+      cd <working_dir> || exit $?; <command>; ec=$?; echo ---SHUTTLE_PWD---; pwd; exit $ec
 
-  The output is split on the sentinel to extract the new working directory.
+  The output is split on the sentinel to extract the new working directory,
+  and the channel exits with the command's own status (so a failing command
+  is not logged as success). If the working directory cannot be entered, the
+  command does not run, no directory is reported, and the channel exits with
+  the failed ``cd`` status.
 * Output is truncated to ``MAX_OUTPUT_BYTES`` (10 MB) before being returned.
 """
 
@@ -18,7 +25,6 @@ from __future__ import annotations
 
 import shlex
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -52,9 +58,6 @@ class SSHSession:
     working_directory:
         Current working directory on the remote host; updated after each
         ``execute()`` call.
-    bypass_patterns:
-        Set of security-rule pattern strings that are bypassed for this
-        session.
     status:
         ``ACTIVE`` until ``close()`` is called.
     env_vars:
@@ -64,7 +67,6 @@ class SSHSession:
     session_id: str
     node_id: str
     working_directory: str = "~"
-    bypass_patterns: set[str] = field(default_factory=set)
     status: SessionStatus = SessionStatus.ACTIVE
     env_vars: dict[str, str] = field(default_factory=dict)
 
@@ -81,19 +83,10 @@ class SessionManager:
     ----------
     pool:
         An initialised ``ConnectionPool`` with nodes already registered.
-    db_session_factory:
-        Optional async callable that returns an async context-manager yielding
-        a DB session.  When provided, session creation and command executions
-        are persisted.  When omitted, everything is in-memory only.
     """
 
-    def __init__(
-        self,
-        pool: Any,
-        db_session_factory: Callable | None = None,
-    ) -> None:
+    def __init__(self, pool: Any) -> None:
         self._pool = pool
-        self._db_session_factory = db_session_factory
         self._sessions: dict[str, SSHSession] = {}
 
     # ------------------------------------------------------------------
@@ -104,8 +97,7 @@ class SessionManager:
         """Create a new session for *node_id*.
 
         Runs ``pwd`` on the remote host to obtain the initial working
-        directory, then stores the session in memory (and persists to DB if a
-        factory is configured).
+        directory, then stores the session in memory.
 
         Parameters
         ----------
@@ -126,8 +118,6 @@ class SessionManager:
             working_directory=working_directory,
         )
         self._sessions[session.session_id] = session
-
-        await self._persist_session(session)
         return session
 
     async def close(self, session_id: str) -> None:
@@ -136,7 +126,6 @@ class SessionManager:
         if session is not None:
             session.status = SessionStatus.CLOSED
             del self._sessions[session_id]
-            await self._persist_session_close(session_id)
 
     def get(self, session_id: str) -> SSHSession | None:
         """Return the active session for *session_id*, or ``None``."""
@@ -205,8 +194,6 @@ class SessionManager:
         if new_pwd:
             session.working_directory = new_pwd
 
-        await self._persist_command_log(session_id, command, stdout)
-
         return {
             "stdout": stdout,
             "stderr": stderr,
@@ -233,25 +220,6 @@ class SessionManager:
                 "exit_status": result.exit_status,
             }
 
-    async def _persist_session(self, session: SSHSession) -> None:
-        """Persist session creation to DB if a factory is available."""
-        if self._db_session_factory is None:
-            return
-        # Placeholder for actual SQLAlchemy ORM calls.
-        # Implementation depends on the ORM model defined in shuttle.db.
-
-    async def _persist_session_close(self, session_id: str) -> None:
-        """Persist session closure to DB if a factory is available."""
-        if self._db_session_factory is None:
-            return
-
-    async def _persist_command_log(
-        self, session_id: str, command: str, output: str
-    ) -> None:
-        """Persist a command log entry to DB if a factory is available."""
-        if self._db_session_factory is None:
-            return
-
 
 # ---------------------------------------------------------------------------
 # Pure functions (exported for testing)
@@ -264,15 +232,25 @@ def _wrap_command(command: str, working_directory: str) -> str:
     The working directory is shell-quoted via ``shlex.quote`` to handle paths
     with spaces and special characters safely.
 
+    The command's exit status is captured immediately after it runs and the
+    channel is terminated with ``exit $ec``. Without this the trailing probe
+    would decide the channel's exit status (always success), masking a failing
+    command. If the working directory cannot be entered, the command does not
+    run, no sentinel is emitted, and the channel exits with the failed ``cd``
+    status, leaving the session's tracked directory unchanged.
+
     Returns
     -------
     str
         A shell string of the form::
 
-            cd <quoted_dir> && <command>; echo ---SHUTTLE_PWD---; pwd
+            cd <quoted_dir> || exit $?; <command>; ec=$?; echo ---SHUTTLE_PWD---; pwd; exit $ec
     """
     quoted_dir = shlex.quote(working_directory)
-    return f"cd {quoted_dir} && {command}; echo {PWD_SENTINEL}; pwd"
+    return (
+        f"cd {quoted_dir} || exit $?; {command}; ec=$?; "
+        f"echo {PWD_SENTINEL}; pwd; exit $ec"
+    )
 
 
 def _parse_sentinel_output(raw: str) -> tuple[str, str]:

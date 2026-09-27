@@ -15,14 +15,43 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shuttle.core.config import ShuttleConfig
 from shuttle.core.connection_pool import ConnectionPool, PoolConfig
 from shuttle.core.credentials import CredentialManager
+from shuttle.core.gate import GATE_TIMEOUT, TypeSafeGate
 from shuttle.core.proxy import NodeConnectInfo
-from shuttle.core.security import CommandGuard, ConfirmTokenStore
+from shuttle.core.security import CommandGuard
 from shuttle.core.session import SessionManager
 from shuttle.db.engine import create_db_engine, create_session_factory, init_db
 from shuttle.db.repository import NodeRepo
 from shuttle.mcp.prompts import register_prompts
 from shuttle.mcp.resources import register_resources
 from shuttle.mcp.tools import register_tools
+
+
+def _build_gate(config: ShuttleConfig) -> TypeSafeGate | None:
+    """Construct the LLM gate when enabled and keyed; None otherwise.
+
+    Construction-time twin of mcp.tools._gate_ready's call-time predicate
+    — keep the two in sync. None means review-level commands deny with
+    reason=disabled (fail closed).
+    """
+    if config.gate_enabled and config.openrouter_api_key:
+        logger.info(
+            "LLM gate enabled: model={m} via {url}",
+            m=config.gate_model,
+            url=config.gate_base_url,
+        )
+        return TypeSafeGate(
+            api_key=config.openrouter_api_key,
+            base_url=config.gate_base_url,
+            model=config.gate_model,
+            timeout=GATE_TIMEOUT,
+        )
+    logger.info(
+        "LLM gate disabled (gate_enabled={e}, api_key={k}) — "
+        "review-level commands will be denied",
+        e=config.gate_enabled,
+        k="set" if config.openrouter_api_key else "missing",
+    )
+    return None
 
 
 async def create_mcp_server(
@@ -39,7 +68,7 @@ async def create_mcp_server(
     5. Create ConnectionPool with config from ShuttleConfig
     6. Register node connection infos from DB (decrypt credentials, warn on failure)
     7. Start eviction loop
-    8. Create ConfirmTokenStore and SessionManager
+    8. Create SessionManager
     9. Create FastMCP(name="shuttle")
     10. Create db_session_ctx async context manager
     11. Call register_tools with all dependencies
@@ -174,29 +203,54 @@ async def create_mcp_server(
     # ── 7. Eviction loop ────────────────────────────────────────────
     await pool.start_eviction_loop()
 
-    # ── 8. Token store + session manager ────────────────────────────
-    token_store = ConfirmTokenStore()
-
+    # ── 8. Session manager ─────────────────────────────────────────
     @asynccontextmanager
     async def db_session_ctx() -> AsyncIterator[AsyncSession]:
         async with session_factory() as sess:
             yield sess
 
-    session_mgr = SessionManager(pool=pool, db_session_factory=db_session_ctx)
+    session_mgr = SessionManager(pool=pool)
 
-    # ── 9. FastMCP ──────────────────────────────────────────────────
-    mcp = FastMCP(name="shuttle")
+    # ── 9. LLM gate (closed on server shutdown) ─────────────────────
+    gate = _build_gate(config)
 
-    # ── 10-11. Register tools, prompts, resources ───────────────────
+    # ── 9a. Hold seam + crash recovery ──────────────────────────────
+    from shuttle.core.holds import HoldManager
+    from shuttle.mcp.tools import build_hold_executor
+
+    holds = HoldManager(
+        db_session_ctx=db_session_ctx,
+        gate=gate,
+        settings=config,
+        executor=build_hold_executor(
+            session_mgr=session_mgr,
+            db_session_ctx=db_session_ctx,
+            node_repo_factory=NodeRepo,
+        ),
+    )
+    await holds.recover()
+
+    # ── 10. FastMCP ─────────────────────────────────────────────────
+    @asynccontextmanager
+    async def _lifespan(server):
+        yield
+        if gate is not None:
+            await gate.aclose()
+
+    mcp = FastMCP(name="shuttle", lifespan=_lifespan)
+
+    # ── 11. Register tools, prompts, resources ──────────────────────
     register_tools(
         mcp=mcp,
         pool=pool,
         guard=guard,
-        token_store=token_store,
+        gate=gate,
         session_mgr=session_mgr,
         db_session_ctx=db_session_ctx,
         node_repo_factory=NodeRepo,
+        settings=config,
         cred_mgr=cred_mgr,
+        holds=holds,
     )
     register_prompts(
         mcp=mcp,
@@ -269,14 +323,33 @@ async def create_service_app(
     pool = ConnectionPool(config=pool_config)
 
     cred_mgr = CredentialManager(config.shuttle_dir)
-    token_store = ConfirmTokenStore()
 
     @asynccontextmanager
     async def db_session_ctx() -> AsyncIterator[AsyncSession]:
         async with session_factory() as sess:
             yield sess
 
-    session_mgr = SessionManager(pool=pool, db_session_factory=db_session_ctx)
+    session_mgr = SessionManager(pool=pool)
+
+    # ── LLM gate (closed on shutdown) ────────────────────────────────
+    gate = _build_gate(config)
+
+    # ── Hold seam (shared with the panel decide adapter) ─────────────
+    from shuttle.core.holds import HoldManager
+    from shuttle.mcp.tools import build_hold_executor
+    from shuttle.web.deps import set_holds_manager
+
+    holds = HoldManager(
+        db_session_ctx=db_session_ctx,
+        gate=gate,
+        settings=config,
+        executor=build_hold_executor(
+            session_mgr=session_mgr,
+            db_session_ctx=db_session_ctx,
+            node_repo_factory=NodeRepo,
+        ),
+    )
+    set_holds_manager(holds)
 
     # ── FastMCP + tools + prompts + resources ────────────────────────
     mcp = FastMCP(name="shuttle")
@@ -284,11 +357,13 @@ async def create_service_app(
         mcp=mcp,
         pool=pool,
         guard=guard,
-        token_store=token_store,
+        gate=gate,
         session_mgr=session_mgr,
         db_session_ctx=db_session_ctx,
         node_repo_factory=NodeRepo,
+        settings=config,
         cred_mgr=cred_mgr,
+        holds=holds,
     )
     register_prompts(
         mcp=mcp,
@@ -312,6 +387,8 @@ async def create_service_app(
     async def combined_lifespan(app: FastAPI):
         # Startup: init DB, seed rules, register nodes, start pool
         await init_db(engine)
+        # Fail any Hold left executing by a crashed process; never re-run it.
+        await holds.recover()
         async with session_factory() as db_sess:
             seeded = await seed_default_rules(db_sess)
             if seeded:
@@ -392,6 +469,8 @@ async def create_service_app(
 
         # Shutdown — force close everything with timeout
         async def _shutdown():
+            if gate is not None:
+                await gate.aclose()
             await pool.close_all()
             await engine.dispose()
 
@@ -424,7 +503,18 @@ async def create_service_app(
     )
 
     # API routes — token auth applied per-router so /mcp is not gated
-    from shuttle.web.routes import data, logs, nodes, rules, sessions, settings, stats
+    from shuttle.web.routes import (
+        data,
+        logs,
+        nodes,
+        rules,
+        sessions,
+        settings,
+        stats,
+    )
+    from shuttle.web.routes import (
+        holds as holds_routes,
+    )
 
     api_deps = [Depends(verify_token)]
     app.include_router(stats.router, prefix="/api", dependencies=api_deps)
@@ -432,6 +522,7 @@ async def create_service_app(
     app.include_router(rules.router, prefix="/api", dependencies=api_deps)
     app.include_router(sessions.router, prefix="/api", dependencies=api_deps)
     app.include_router(logs.router, prefix="/api", dependencies=api_deps)
+    app.include_router(holds_routes.router, prefix="/api", dependencies=api_deps)
     app.include_router(settings.router, prefix="/api", dependencies=api_deps)
     app.include_router(data.router, prefix="/api", dependencies=api_deps)
 

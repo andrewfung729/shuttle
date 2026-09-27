@@ -6,30 +6,51 @@ via the ``shuttle://nodes`` resource, not a tool.)
 
 Sessions are managed implicitly: ``ssh_run`` auto-creates or reuses a session
 per node so that working directory context is preserved across calls.
+
+Every command runs through CommandGuard first. ``block`` denies, ``allow``
+executes, and unmatched commands go to the LLM gate: confident-safe scores
+execute, clearly-unsafe scores deny, and the uncertain band parks a Hold
+(see ``shuttle.core.holds``) for one Operator decision. The caller receives
+one of three strings — stdout, ``Error: denied by policy`` (replan), or
+``Error: awaiting operator`` (retry the identical command). Scores, band
+names, rule text, and Hold ids never reach the caller.
 """
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from fastmcp import Context
 from loguru import logger
 
-from shuttle.core.security import CommandGuard, ConfirmTokenStore, SecurityLevel
+from shuttle.core.gate import GatePort
+from shuttle.core.holds import (
+    AWAITING_MESSAGE,
+    DEFAULT_COMMAND_TIMEOUT,
+    DENIED_MESSAGE,
+    Execution,
+    HoldManager,
+    client_id,
+    conversation_key,
+    truncate_output,
+)
+from shuttle.core.security import CommandGuard, SecurityLevel
 from shuttle.core.session import SessionManager
+
+__all__ = [
+    "AWAITING_MESSAGE",
+    "DENIED_MESSAGE",
+    "build_hold_executor",
+    "register_tools",
+]
 
 # Truncation limits
 MAX_OUTPUT_BYTES = 10 * 1024 * 1024  # 10 MB for caller output
 MAX_DB_OUTPUT_BYTES = 64 * 1024  # 64 KB for DB storage
-
-
-def _truncate(text: str, limit: int) -> str:
-    """Truncate *text* to *limit* bytes (UTF-8), appending a marker if truncated."""
-    encoded = text.encode("utf-8", errors="replace")
-    if len(encoded) <= limit:
-        return text
-    return encoded[:limit].decode("utf-8", errors="replace") + "\n... [truncated]"
 
 
 # ---------------------------------------------------------------------------
@@ -37,56 +58,241 @@ def _truncate(text: str, limit: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+async def _log_denial(
+    db_session_ctx: Callable[..., AsyncIterator],
+    *,
+    node_uuid: str,
+    session_id: str | None,
+    command: str,
+    decision: Any,
+    gate_score: float | None,
+    gate_reason: str | None,
+    conversation_key: str | None = None,
+) -> None:
+    """Persist a denial row (best-effort — a logging failure never changes
+    the denial itself)."""
+    try:
+        async with db_session_ctx() as db_sess:
+            from shuttle.db.repository import LogRepo
+
+            await LogRepo(db_sess).create(
+                node_id=node_uuid,
+                session_id=session_id,
+                command=command,
+                exit_code=None,
+                security_level=decision.level.value,
+                security_rule_id=decision.matched_rule,
+                conversation_key=conversation_key,
+                gate_score=gate_score,
+                gate_reason=gate_reason,
+            )
+    except Exception:
+        logger.warning("Failed to persist denial log for {cmd}", cmd=command[:80])
+
+
+async def _persist_execution_log(
+    db_session_ctx: Callable[..., AsyncIterator],
+    *,
+    node_id: str,
+    session_id: str | None,
+    command: str,
+    exit_code: int | None,
+    stdout: str,
+    stderr: str,
+    security_level: str | None,
+    security_rule_id: str | None,
+    conversation_key: str | None,
+    gate_score: float | None,
+    gate_reason: str | None,
+    duration_ms: int,
+) -> None:
+    """Write exactly one execution audit row (best-effort).
+
+    Used by every execution path, including a failed session attempt, so the
+    ledger records the disposition even when the command never ran.
+    """
+    try:
+        db_stdout = truncate_output(stdout, MAX_DB_OUTPUT_BYTES) if stdout else None
+        db_stderr = truncate_output(stderr, MAX_DB_OUTPUT_BYTES) if stderr else None
+        async with db_session_ctx() as db_sess:
+            from shuttle.db.repository import LogRepo
+
+            await LogRepo(db_sess).create(
+                node_id=node_id,
+                session_id=session_id,
+                command=command,
+                exit_code=exit_code,
+                stdout=db_stdout,
+                stderr=db_stderr,
+                security_level=security_level,
+                security_rule_id=security_rule_id,
+                conversation_key=conversation_key,
+                gate_score=gate_score,
+                gate_reason=gate_reason,
+                duration_ms=duration_ms,
+            )
+    except Exception:
+        logger.warning("Failed to persist command log for {cmd}", cmd=command[:80])
+
+
+async def _run_and_log(
+    *,
+    node: str,
+    node_id: str,
+    command: str,
+    timeout: float,
+    security_level: str | None,
+    security_rule_id: str | None,
+    gate_score: float | None,
+    gate_reason: str | None,
+    conversation_key: str | None,
+    session_mgr: SessionManager,
+    db_session_ctx: Callable[..., AsyncIterator],
+    node_repo_factory: Callable,
+) -> Execution:
+    """Run one command via an SSH session and record exactly one audit row.
+
+    Reuses the node's active session when present, else creates one. Returns
+    the stdout (or the existing ``[ERROR]`` text) plus exit code.
+    """
+    t0 = time.monotonic()
+
+    active_sessions = session_mgr.list_active()
+    node_session = next((s for s in active_sessions if s.node_id == node), None)
+    if node_session is not None:
+        session_id = node_session.session_id
+    else:
+        session_id = None
+        try:
+            new_session = await session_mgr.create(node)
+            session_id = new_session.session_id
+        except Exception as exc:
+            # The attempt is still audited, and the node is *not* marked seen.
+            stdout = f"Error: failed to auto-create session — {exc}"
+            await _persist_execution_log(
+                db_session_ctx,
+                node_id=node_id,
+                session_id=None,
+                command=command,
+                exit_code=-1,
+                stdout=stdout,
+                stderr=str(exc),
+                security_level=security_level,
+                security_rule_id=security_rule_id,
+                conversation_key=conversation_key,
+                gate_score=gate_score,
+                gate_reason=gate_reason,
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
+            return Execution(stdout=stdout, exit_code=-1)
+
+    try:
+        result = await session_mgr.execute(session_id, command, timeout=timeout)
+        stdout = result.get("stdout", "")
+        stderr = result.get("stderr", "")
+        exit_status = result.get("exit_status")
+    except Exception as exc:
+        stdout = f"[ERROR] {exc}"
+        stderr = str(exc)
+        exit_status = -1
+    duration_ms = int((time.monotonic() - t0) * 1000)
+
+    # Single audit point: every execution path records its log here.
+    await _persist_execution_log(
+        db_session_ctx,
+        node_id=node_id,
+        session_id=session_id,
+        command=command,
+        exit_code=exit_status,
+        stdout=stdout,
+        stderr=stderr,
+        security_level=security_level,
+        security_rule_id=security_rule_id,
+        conversation_key=conversation_key,
+        gate_score=gate_score,
+        gate_reason=gate_reason,
+        duration_ms=duration_ms,
+    )
+
+    # A session that opened and ran marks the node seen; a failed attempt does not.
+    try:
+        async with db_session_ctx() as db_sess:
+            repo = node_repo_factory(db_sess)
+            await repo.update(
+                node_id,
+                last_seen_at=datetime.now(UTC),
+                status="active",
+            )
+    except Exception:
+        logger.warning("Failed to update node last_seen_at for {node}", node=node)
+
+    return Execution(stdout=stdout, exit_code=exit_status)
+
+
+def build_hold_executor(
+    *,
+    session_mgr: SessionManager,
+    db_session_ctx: Callable[..., AsyncIterator],
+    node_repo_factory: Callable,
+    timeout: float = DEFAULT_COMMAND_TIMEOUT,
+) -> Callable[..., Any]:
+    """Build the server-owned executor used for a run-once Hold decision.
+
+    Resolves the node id back to a name, runs the exact command, and records
+    the execution in CommandLog with ``gate_reason="once"``.
+    """
+
+    async def _execute_once(
+        *,
+        node_id: str,
+        command: str,
+        gate_score: float | None = None,
+        conversation_key: str | None = None,
+    ) -> Execution:
+        async with db_session_ctx() as db_sess:
+            node = await node_repo_factory(db_sess).get_by_id(node_id)
+        node_name = node.name if node is not None else node_id
+        return await _run_and_log(
+            node=node_name,
+            node_id=node_id,
+            command=command,
+            timeout=timeout,
+            security_level=SecurityLevel.GATE.value,
+            security_rule_id=None,
+            gate_score=gate_score,
+            gate_reason="once",
+            conversation_key=conversation_key,
+            session_mgr=session_mgr,
+            db_session_ctx=db_session_ctx,
+            node_repo_factory=node_repo_factory,
+        )
+
+    return _execute_once
+
+
 async def _execute_command_logic(
     *,
     command: str,
     node: str | None,
     timeout: float,
-    confirm_token: str | None,
-    bypass_scope: str | None,
-    pool: Any,
     guard: CommandGuard,
-    token_store: ConfirmTokenStore,
+    holds: HoldManager,
     session_mgr: SessionManager,
     db_session_ctx: Callable[..., AsyncIterator],
     node_repo_factory: Callable,
+    conversation_key: str,
+    client_id: str | None = None,
 ) -> str:
     """Execute a command with security checks, node resolution, and DB logging.
 
-    Sessions are implicit: if an active session exists for the resolved node it
-    is reused; otherwise a new session is created automatically.
+    Block rules deny; allow rules execute; unmatched commands go to the Hold
+    seam, which scores with the LLM gate and either lets the caller execute,
+    denies, or parks/waits on a Hold. Security comes before any session work:
+    a denied command never opens an SSH session.
 
-    Parameters
-    ----------
-    command : str
-        The shell command to run.
-    node : str | None
-        Named node to target.  Auto-selected when only one node exists.
-    timeout : float
-        Command timeout in seconds.
-    confirm_token : str | None
-        One-time confirmation token for CONFIRM-level commands.
-    bypass_scope : str | None
-        If "session", add the matched rule pattern to the session's bypass list.
-    pool : ConnectionPool
-        SSH connection pool.
-    guard : CommandGuard
-        Security rule evaluator.
-    token_store : ConfirmTokenStore
-        Token store for confirmation flow.
-    session_mgr : SessionManager
-        Session manager for session-based execution.
-    db_session_ctx : callable
-        Async context manager factory yielding a DB session.
-    node_repo_factory : callable
-        Factory that accepts a DB session and returns a NodeRepo.
-
-    Returns
-    -------
-    str
-        Command output or a security/error message.
+    Returns the command output or one of the fixed agent-visible strings.
     """
-    # -- 1. Resolve target node -----------------------------------------------
+    # -- 1. Resolve target node ------------------------------------------------
     resolved_node: str | None = node
 
     if resolved_node is None:
@@ -103,121 +309,85 @@ async def _execute_command_logic(
                 "Provide 'node'."
             )
 
-    # -- 2. Auto-session: find existing or create ----------------------------
+    # -- 2. Resolve node UUID (needed for logging) ------------------------------
+    async with db_session_ctx() as db_sess:
+        repo = node_repo_factory(db_sess)
+        node_obj = await repo.get_by_name(resolved_node)
+    if node_obj is None:
+        return f"Error: node '{resolved_node}' not found."
+    node_uuid = node_obj.id
+
+    # -- 3. Resolve the session without opening one ------------------------------
+    # Denied commands never create SSH sessions; reuse an existing one for
+    # the audit trail when present.
     active_sessions = session_mgr.list_active()
     node_session = next(
         (s for s in active_sessions if s.node_id == resolved_node), None
     )
-    if node_session:
-        session_id = node_session.session_id
-        session_obj = node_session
-    else:
-        try:
-            new_session = await session_mgr.create(resolved_node)
-            session_id = new_session.session_id
-            session_obj = new_session
-        except Exception as exc:
-            return f"Error: failed to auto-create session — {exc}"
+    session_id = node_session.session_id if node_session else None
 
-    # -- 3. Security check ----------------------------------------------------
-    bypass_patterns = list(session_obj.bypass_patterns) if session_obj else []
+    # -- 4. Security check ---------------------------------------------------------
     async with db_session_ctx() as db_sess:
-        decision = await guard.evaluate(
-            command, resolved_node, db_sess, bypass_patterns
-        )
+        decision = await guard.evaluate(command, resolved_node, db_sess)
 
     if decision.level == SecurityLevel.BLOCK:
-        return f"⛔ Blocked: {decision.message}"
-
-    if decision.level == SecurityLevel.CONFIRM:
-        if confirm_token is None:
-            # Create a token and ask the caller to confirm
-            token = token_store.create(command, resolved_node)
-            return (
-                f"⚠️ Confirmation required\n"
-                f"Command: {command}\n"
-                f"Rule: {decision.message}\n"
-                f"\n"
-                f'To proceed: ssh_run(command="{command}", node="{resolved_node}", confirm_token="{token}")'
-            )
-
-        # Validate the provided token
-        if not token_store.validate(confirm_token, command, resolved_node):
-            return "Error: invalid or expired confirmation token."
-
-        # Token valid — optionally add bypass for this session
-        if bypass_scope == "session" and session_obj and decision.matched_rule:
-            async with db_session_ctx() as db_sess:
-                from shuttle.db.repository import RuleRepo
-
-                rule_repo = RuleRepo(db_sess)
-                matched = await rule_repo.get_by_id(decision.matched_rule)
-                if matched:
-                    session_obj.bypass_patterns.add(matched.pattern)
-
-    if decision.level == SecurityLevel.WARN:
-        logger.warning(
-            "WARN rule matched: rule={rule} command={cmd} node={node}",
-            rule=decision.matched_rule,
-            cmd=command,
-            node=resolved_node,
+        await _log_denial(
+            db_session_ctx,
+            node_uuid=node_uuid,
+            session_id=session_id,
+            command=command,
+            decision=decision,
+            gate_score=None,
+            gate_reason=None,
+            conversation_key=conversation_key,
         )
+        return DENIED_MESSAGE
 
-    # -- 4. Execute via session -----------------------------------------------
-    import time as _time
+    if decision.level == SecurityLevel.ALLOW:
+        execution = await _run_and_log(
+            node=resolved_node,
+            node_id=node_uuid,
+            command=command,
+            timeout=timeout,
+            security_level=SecurityLevel.ALLOW.value,
+            security_rule_id=decision.matched_rule,
+            gate_score=None,
+            gate_reason=None,
+            conversation_key=conversation_key,
+            session_mgr=session_mgr,
+            db_session_ctx=db_session_ctx,
+            node_repo_factory=node_repo_factory,
+        )
+        return execution.stdout
 
-    t0 = _time.monotonic()
-    try:
-        result = await session_mgr.execute(session_id, command, timeout=timeout)
-        stdout = result.get("stdout", "")
-        exit_status = result.get("exit_status")
-    except Exception as exc:
-        stdout = f"[ERROR] {exc}"
-        exit_status = -1
-        result = {"stdout": stdout, "exit_status": exit_status}
-    duration_ms = int((_time.monotonic() - t0) * 1000)
+    # -- 5. Unmatched: Hold seam (gate + bands + bounded wait) --------------------
+    outcome = await holds.triage(
+        command=command,
+        node=resolved_node,
+        node_id=node_uuid,
+        conversation_key=conversation_key,
+        client_id=client_id,
+        session_id=session_id,
+        matched_rule=decision.matched_rule,
+    )
+    if not outcome.execute:
+        return outcome.text if outcome.text is not None else DENIED_MESSAGE
 
-    # -- 5. Persist command log to DB -----------------------------------------
-    try:
-        # Resolve node UUID for the FK
-        node_uuid: str | None = None
-        async with db_session_ctx() as db_sess:
-            repo = node_repo_factory(db_sess)
-            node_obj = await repo.get_by_name(resolved_node)
-            if node_obj:
-                node_uuid = node_obj.id
-
-        if node_uuid:
-            db_stdout = _truncate(stdout, MAX_DB_OUTPUT_BYTES) if stdout else None
-            async with db_session_ctx() as db_sess:
-                from shuttle.db.repository import LogRepo
-
-                log_repo = LogRepo(db_sess)
-                await log_repo.create(
-                    node_id=node_uuid,
-                    session_id=session_id,
-                    command=command,
-                    exit_code=exit_status,
-                    stdout=db_stdout,
-                    stderr=None,
-                    security_level=decision.level.value if decision else None,
-                    security_rule_id=decision.matched_rule if decision else None,
-                    bypassed=confirm_token is not None,
-                    duration_ms=duration_ms,
-                )
-
-            # Update node last_seen_at
-            async with db_session_ctx() as db_sess:
-                repo = node_repo_factory(db_sess)
-                from datetime import UTC, datetime
-
-                await repo.update(
-                    node_obj.id, last_seen_at=datetime.now(UTC), status="active"
-                )
-    except Exception:
-        logger.warning("Failed to persist command log for {cmd}", cmd=command[:80])
-
-    return stdout
+    execution = await _run_and_log(
+        node=resolved_node,
+        node_id=node_uuid,
+        command=command,
+        timeout=timeout,
+        security_level=SecurityLevel.GATE.value,
+        security_rule_id=decision.matched_rule,
+        gate_score=outcome.gate_score,
+        gate_reason=None,
+        conversation_key=conversation_key,
+        session_mgr=session_mgr,
+        db_session_ctx=db_session_ctx,
+        node_repo_factory=node_repo_factory,
+    )
+    return execution.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -229,11 +399,13 @@ def register_tools(
     mcp: Any,
     pool: Any,
     guard: CommandGuard,
-    token_store: ConfirmTokenStore,
+    gate: GatePort | None,
     session_mgr: SessionManager,
     db_session_ctx: Callable,
     node_repo_factory: Callable,
+    settings: Any = None,
     cred_mgr: Any = None,
+    holds: HoldManager | None = None,
 ) -> None:
     """Register all Shuttle MCP tools on the given FastMCP instance.
 
@@ -245,45 +417,65 @@ def register_tools(
         SSH connection pool.
     guard : CommandGuard
         Security evaluator.
-    token_store : ConfirmTokenStore
-        Confirmation token store.
+    gate : GatePort | None
+        LLM gate for unmatched commands (None denies as disabled).
     session_mgr : SessionManager
         Session manager.
     db_session_ctx : callable
         Async context manager factory yielding a DB AsyncSession.
     node_repo_factory : callable
         Factory accepting a DB session and returning a NodeRepo.
+    settings : ShuttleConfig
+        Runtime configuration (gate_enabled, openrouter_api_key,
+        gate_safe_instructions).
     cred_mgr : CredentialManager | None
         Credential manager for encrypting node credentials.
+    holds : HoldManager | None
+        The Hold seam. Built from the other arguments when omitted.
     """
+    if holds is None:
+        holds = HoldManager(
+            db_session_ctx=db_session_ctx,
+            gate=gate,
+            settings=settings,
+            executor=build_hold_executor(
+                session_mgr=session_mgr,
+                db_session_ctx=db_session_ctx,
+                node_repo_factory=node_repo_factory,
+            ),
+        )
 
     # -- ssh_run --------------------------------------------------------------
     @mcp.tool()
     async def ssh_run(
         command: str,
         node: str | None = None,
-        timeout: float = 30.0,
-        confirm_token: str | None = None,
-        bypass_scope: str | None = None,
+        timeout: float = DEFAULT_COMMAND_TIMEOUT,
+        ctx: Context | None = None,
     ) -> str:
         """Execute a shell command on a remote SSH node.
 
         Sessions are managed automatically: working directory is preserved
-        across calls to the same node. Security checks (BLOCK / CONFIRM /
-        WARN / ALLOW) are applied before execution.
+        across calls to the same node. Every command is checked against
+        Security Rules first.
+
+        The result is one of three shapes. Command output means it ran.
+        ``Error: denied by policy`` means the command was refused — replan,
+        and do not probe with variants. ``Error: awaiting operator`` means an
+        operator may still allow this exact command — retry the identical
+        command later. A denial may add an operator note after the prefix.
         """
         return await _execute_command_logic(
             command=command,
             node=node,
             timeout=timeout,
-            confirm_token=confirm_token,
-            bypass_scope=bypass_scope,
-            pool=pool,
             guard=guard,
-            token_store=token_store,
+            holds=holds,
             session_mgr=session_mgr,
             db_session_ctx=db_session_ctx,
             node_repo_factory=node_repo_factory,
+            conversation_key=conversation_key(ctx),
+            client_id=client_id(ctx),
         )
 
     # -- ssh_upload -----------------------------------------------------------

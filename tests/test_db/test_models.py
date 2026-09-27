@@ -155,7 +155,6 @@ async def test_command_log_creation(db_session):
         stdout="total 12\n...",
         stderr="",
         security_level="safe",
-        bypassed=False,
         duration_ms=42,
     )
     db_session.add(log)
@@ -193,7 +192,6 @@ async def test_command_log_nullable_session(db_session):
         stdout="root\n",
         stderr="",
         security_level="safe",
-        bypassed=False,
         duration_ms=10,
     )
     db_session.add(log)

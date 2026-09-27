@@ -6,7 +6,7 @@ Shuttle lets AI assistants (Claude Code, Cursor, etc.) securely execute commands
 
 ## Features
 
-- **4-Level Command Security** --- Block dangerous commands, require confirmation for risky ones, warn on installs, allow the rest
+- **Block / allow rules + LLM Gate** --- Block destructive commands, score the rest, and park uncertain commands as Holds for an operator
 - **Connection Pooling** --- Reuse SSH connections across commands, no repeated handshakes
 - **Session Isolation** --- Each AI conversation gets its own working directory context
 - **Web Audit Panel** --- See every command the AI ran, per node, with full stdout/stderr
@@ -50,12 +50,12 @@ See [MCP Setup](mcp-setup.md) for detailed instructions for Claude Code, Cursor,
 
 AI assistants get these tools automatically:
 
-| Tool             | Description                                            |
-| ---------------- | ------------------------------------------------------ |
-| `ssh_run`        | Run a command on a remote node (sessions auto-managed) |
-| `ssh_upload`     | Upload a file via SFTP                                 |
-| `ssh_download`   | Download a file via SFTP                               |
-| `ssh_add_node`   | Add a new SSH node                                     |
+| Tool           | Description                                            |
+| -------------- | ------------------------------------------------------ |
+| `ssh_run`      | Run a command on a remote node (sessions auto-managed) |
+| `ssh_upload`   | Upload a file via SFTP                                 |
+| `ssh_download` | Download a file via SFTP                               |
+| `ssh_add_node` | Add a new SSH node                                     |
 
 AI assistants also get 6 read-only resources with live runtime state: nodes (`shuttle://nodes`), per-node detail, security rules, active sessions, pool status, and recent command logs. See the [MCP API Reference](api.md) for the full list.
 
@@ -78,7 +78,7 @@ Developer <-> AI Assistant <-> Shuttle (MCP) <-> SSH <-> Remote Servers
 ## Documentation
 
 - [Configuration](configuration.md) --- Environment variables, database URLs, pool parameters
-- [Security Rules](security-rules.md) --- 4-level rule system, regex patterns, per-node overrides
+- [Security Rules](security-rules.md) --- Block/allow rules, LLM gate, Holds, per-node overrides
 - [MCP Setup](mcp-setup.md) --- Claude Code, Cursor, stdio and HTTP modes
 - [Web Panel](web-panel.md) --- Overview, activity logs, rule management, settings
 

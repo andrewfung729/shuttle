@@ -1,5 +1,5 @@
 import { NavLink, useLocation } from "react-router-dom";
-import { Shield, Settings, Server, Sun, Moon } from "lucide-react";
+import { Shield, Settings, Server, Sun, Moon, PauseCircle } from "lucide-react";
 import clsx from "clsx";
 import { useApp } from "../hooks/AppContext";
 
@@ -98,6 +98,10 @@ export default function Sidebar() {
 
         <div className="!my-4 border-t border-[var(--border-subtle)]" />
 
+        <NavLink to="/holds" className={({ isActive }) => navItemCls(isActive)}>
+          <PauseCircle size={14} strokeWidth={1.8} />
+          Holds
+        </NavLink>
         <NavLink to="/rules" className={({ isActive }) => navItemCls(isActive)}>
           <Shield size={14} strokeWidth={1.8} />
           Rules

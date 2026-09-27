@@ -3,10 +3,17 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shuttle.db.models import AppConfig, CommandLog, Node, SecurityRule, Session
+from shuttle.db.models import (
+    AppConfig,
+    CommandLog,
+    Hold,
+    Node,
+    SecurityRule,
+    Session,
+)
 
 
 class NodeRepo:
@@ -256,7 +263,9 @@ class LogRepo:
         stderr: str | None = None,
         security_level: str | None = None,
         security_rule_id: str | None = None,
-        bypassed: bool = False,
+        conversation_key: str | None = None,
+        gate_score: float | None = None,
+        gate_reason: str | None = None,
         duration_ms: int | None = None,
     ) -> CommandLog:
         log = CommandLog(
@@ -268,7 +277,9 @@ class LogRepo:
             stderr=stderr,
             security_level=security_level,
             security_rule_id=security_rule_id,
-            bypassed=bypassed,
+            conversation_key=conversation_key,
+            gate_score=gate_score,
+            gate_reason=gate_reason,
             duration_ms=duration_ms,
         )
         self._session.add(log)
@@ -306,6 +317,173 @@ class LogRepo:
         )
         return list(result.scalars().all())
 
+    async def list_by_conversation(
+        self,
+        conversation_key: str,
+        limit: int = 20,
+    ) -> list[CommandLog]:
+        """List recent command logs for one server-derived conversation."""
+        result = await self._session.execute(
+            select(CommandLog)
+            .where(CommandLog.conversation_key == conversation_key)
+            .order_by(CommandLog.executed_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+
+class HoldRepo:
+    """CRUD and state transitions for Hold records."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(
+        self,
+        *,
+        conversation_key: str,
+        node_id: str,
+        command: str,
+        command_hash: str,
+        gate_score: float | None,
+        expires_at: datetime,
+        client_id: str | None = None,
+    ) -> Hold:
+        hold = Hold(
+            conversation_key=conversation_key,
+            client_id=client_id,
+            node_id=node_id,
+            command=command,
+            command_hash=command_hash,
+            gate_score=gate_score,
+            status="pending",
+            expires_at=expires_at,
+        )
+        self._session.add(hold)
+        await self._session.commit()
+        await self._session.refresh(hold)
+        return hold
+
+    async def get(self, hold_id: str) -> Hold | None:
+        result = await self._session.execute(select(Hold).where(Hold.id == hold_id))
+        return result.scalar_one_or_none()
+
+    async def get_by_key(
+        self,
+        *,
+        conversation_key: str,
+        node_id: str,
+        command_hash: str,
+    ) -> Hold | None:
+        result = await self._session.execute(
+            select(Hold).where(
+                Hold.conversation_key == conversation_key,
+                Hold.node_id == node_id,
+                Hold.command_hash == command_hash,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[Hold]:
+        stmt = select(Hold).order_by(Hold.created_at.desc()).limit(limit)
+        if status is not None:
+            stmt = stmt.where(Hold.status == status)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def count_pending(self, conversation_key: str) -> int:
+        """Open (pending) Holds for one conversation, for the cap check."""
+        result = await self._session.execute(
+            select(Hold.id).where(
+                Hold.conversation_key == conversation_key,
+                Hold.status == "pending",
+            )
+        )
+        return len(list(result.scalars().all()))
+
+    async def mark_executing(self, hold_id: str, operator: str) -> bool:
+        """pending -> executing. False when the Hold is not decidable."""
+        result = await self._session.execute(
+            update(Hold)
+            .where(Hold.id == hold_id, Hold.status == "pending")
+            .values(
+                status="executing",
+                operator=operator,
+                decided_at=datetime.now(UTC),
+            )
+        )
+        await self._session.commit()
+        return bool(result.rowcount)
+
+    async def mark_denied(self, hold_id: str, operator: str, note: str | None) -> bool:
+        """pending -> denied. False when the Hold is not decidable."""
+        result = await self._session.execute(
+            update(Hold)
+            .where(Hold.id == hold_id, Hold.status == "pending")
+            .values(
+                status="denied",
+                operator=operator,
+                denial_note=note,
+                decided_at=datetime.now(UTC),
+            )
+        )
+        await self._session.commit()
+        return bool(result.rowcount)
+
+    async def set_result(
+        self, hold_id: str, *, stdout: str | None, exit_code: int | None
+    ) -> None:
+        await self._session.execute(
+            update(Hold)
+            .where(Hold.id == hold_id, Hold.status == "executing")
+            .values(
+                status="executed",
+                stdout=stdout,
+                exit_code=exit_code,
+                executed_at=datetime.now(UTC),
+            )
+        )
+        await self._session.commit()
+
+    async def mark_failed(self, hold_id: str) -> None:
+        await self._session.execute(
+            update(Hold)
+            .where(Hold.id == hold_id)
+            .values(status="failed", decided_at=datetime.now(UTC))
+        )
+        await self._session.commit()
+
+    async def mark_expired(self, hold_id: str) -> None:
+        await self._session.execute(
+            update(Hold)
+            .where(Hold.id == hold_id, Hold.status == "pending")
+            .values(status="expired")
+        )
+        await self._session.commit()
+
+    async def sweep_expired(self, now: datetime) -> int:
+        """Mark pending Holds past their TTL as expired. Returns the count."""
+        result = await self._session.execute(
+            update(Hold)
+            .where(Hold.status == "pending", Hold.expires_at <= now)
+            .values(status="expired")
+        )
+        await self._session.commit()
+        return result.rowcount or 0
+
+    async def recover_executing(self) -> int:
+        """Fail executing Holds left over from a crash; never re-run them."""
+        result = await self._session.execute(
+            update(Hold).where(Hold.status == "executing").values(status="failed")
+        )
+        await self._session.commit()
+        return result.rowcount or 0
+
 
 async def cleanup_old_data(
     session: AsyncSession,
@@ -316,8 +494,6 @@ async def cleanup_old_data(
 
     Returns dict with counts of deleted records.
     """
-    from sqlalchemy import delete
-
     cutoff_logs = datetime.now(UTC) - timedelta(days=command_log_days)
     cutoff_sessions = datetime.now(UTC) - timedelta(days=closed_session_days)
 

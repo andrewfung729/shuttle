@@ -75,6 +75,10 @@ async def init_db(engine: AsyncEngine) -> None:
             except Exception:
                 pass  # Index might already exist or DB doesn't support IF NOT EXISTS
 
+        # Breaking change (LLM gate replaces the Approval Queue): drop the
+        # approval storage and its dead command-log columns. No data migration.
+        await conn.execute(text("DROP TABLE IF EXISTS pending_approvals"))
+
         # Migration: add source_rule_id if missing (v1 → v2)
         if "sqlite" in str(engine.url):
             result = await conn.execute(text("PRAGMA table_info(security_rules)"))
@@ -83,6 +87,34 @@ async def init_db(engine: AsyncEngine) -> None:
                 await conn.execute(
                     text(
                         "ALTER TABLE security_rules ADD COLUMN source_rule_id VARCHAR(36)"
+                    )
+                )
+
+            # Migration: drop removed command_logs columns (approval queue era)
+            # and add LLM-gate audit columns.
+            result_cl = await conn.execute(text("PRAGMA table_info(command_logs)"))
+            cl_columns = [row[1] for row in result_cl]
+            for dead in ("approval_id", "bypassed"):
+                if dead in cl_columns:
+                    try:
+                        await conn.execute(
+                            text(f"ALTER TABLE command_logs DROP COLUMN {dead}")
+                        )
+                    except Exception:
+                        pass  # SQLite < 3.35 cannot DROP COLUMN; dead column is harmless
+            if "gate_score" not in cl_columns:
+                await conn.execute(
+                    text("ALTER TABLE command_logs ADD COLUMN gate_score FLOAT")
+                )
+            if "gate_reason" not in cl_columns:
+                await conn.execute(
+                    text("ALTER TABLE command_logs ADD COLUMN gate_reason VARCHAR(20)")
+                )
+            if "conversation_key" not in cl_columns:
+                await conn.execute(
+                    text(
+                        "ALTER TABLE command_logs "
+                        "ADD COLUMN conversation_key VARCHAR(255)"
                     )
                 )
 
@@ -110,6 +142,32 @@ async def init_db(engine: AsyncEngine) -> None:
                         "ALTER TABLE security_rules ADD COLUMN source_rule_id VARCHAR(36)"
                     )
                 )
+
+            # Migration: drop removed command_logs columns (approval queue era)
+            # and add LLM-gate audit columns.
+            for dead in ("approval_id", "bypassed"):
+                await conn.execute(
+                    text(f"ALTER TABLE command_logs DROP COLUMN IF EXISTS {dead}")
+                )
+            for col, add_sql in (
+                ("gate_score", "ALTER TABLE command_logs ADD COLUMN gate_score FLOAT"),
+                (
+                    "gate_reason",
+                    "ALTER TABLE command_logs ADD COLUMN gate_reason VARCHAR(20)",
+                ),
+                (
+                    "conversation_key",
+                    "ALTER TABLE command_logs ADD COLUMN conversation_key VARCHAR(255)",
+                ),
+            ):
+                result_cl = await conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        f"WHERE table_name = 'command_logs' AND column_name = '{col}'"
+                    )
+                )
+                if not result_cl.fetchone():
+                    await conn.execute(text(add_sql))
 
             # Migration: add latency_ms + last_seen_at to nodes
             result2 = await conn.execute(

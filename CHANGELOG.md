@@ -4,6 +4,15 @@ All notable changes to Shuttle are documented here.
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **LLM gate and Holds replace confirm tokens and the Approval Queue.** Security rules are `block` or `allow` only. Unmatched commands are scored by a fail-closed LLM gate (`SHUTTLE_GATE_ENABLED`, `SHUTTLE_OPENROUTER_API_KEY`): score ≥ 0.9 executes, 0.3–0.9 parks a Hold, below 0.3 denies. `ssh_run` no longer accepts `confirm_token`, `approval_id`, `approval_wait`, or `bypass_scope`. The agent sees command output, `Error: denied by policy`, or `Error: awaiting operator`. See [ADR-0003](docs/adr/0003-uncertain-band-hold.md).
+
+### Added
+
+- Holds page in the web panel (run once / deny, optional Denial Note) and REST API under `/api/holds`.
+- Command log rows record the real exit status, including failed session attempts, with gate score and reason.
+
 ### Fixed
 
 - **SSH config parser: quoted values** ([#7](https://github.com/enwaiax/shuttle/issues/7)) — `IdentityFile "~/.ssh/id_rsa"` kept its surrounding quotes, so `resolve_key()` failed to find the key and `shuttle node import` silently skipped the host. Single quotes and quoted paths containing spaces are handled too.

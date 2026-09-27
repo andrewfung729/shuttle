@@ -29,6 +29,6 @@ You will receive a response within 48 hours. We will work with you to understand
 Shuttle handles SSH credentials and executes remote commands. Key security features:
 
 - **Credential encryption:** All SSH passwords and private keys are encrypted at rest using Fernet (AES-128-CBC)
-- **4-level command security:** Block, confirm, warn, or allow commands based on regex rules
+- **Command security:** Regex rules are `block` or `allow` only. Unmatched commands are scored by a fail-closed LLM gate; the uncertain band parks a Hold for an operator. There is no confirm-token or approval-id protocol.
 - **API token authentication:** Web panel requires a bearer token
 - **No credential logging:** Passwords and keys are never written to logs or command history
