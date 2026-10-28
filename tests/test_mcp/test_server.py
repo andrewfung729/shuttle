@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from shuttle.mcp.server import create_mcp_server
+from shuttle.mcp.server import _build_gate, create_mcp_server
 
 EXPECTED_TOOLS = {
     "ssh_run",
@@ -51,3 +52,28 @@ async def test_create_mcp_server_registers_expected_tools(tmp_path):
     assert EXPECTED_TOOLS.issubset(tool_names), (
         f"Missing tools: {EXPECTED_TOOLS - tool_names}"
     )
+
+
+def _gate_config(**overrides):
+    values = {
+        "gate_enabled": True,
+        "openrouter_api_key": "sk-or-test",
+        "gate_model": "typesafe/jev-1.13",
+        "gate_base_url": "https://openrouter.ai/api",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_build_gate_requires_gate_model():
+    """An enabled gate without SHUTTLE_GATE_MODEL is not constructed."""
+    with patch("shuttle.mcp.server.TypeSafeGate") as gate_cls:
+        assert _build_gate(_gate_config(gate_model=None)) is None
+    gate_cls.assert_not_called()
+
+
+def test_build_gate_uses_configured_model():
+    with patch("shuttle.mcp.server.TypeSafeGate") as gate_cls:
+        gate = _build_gate(_gate_config(gate_model="jev-1.13.0"))
+    assert gate is gate_cls.return_value
+    assert gate_cls.call_args.kwargs["model"] == "jev-1.13.0"

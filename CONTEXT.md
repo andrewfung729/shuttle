@@ -23,7 +23,7 @@ Default when no block/allow rule matches: route the command to the LLM Gate.
 _Avoid_: review level, confirm level
 
 **LLM Gate**:
-Default decision path for unmatched commands: a decision model (default `typesafe/jev-1.13` via OpenRouter's System One API) scores a single `is_safe` question about the command. Bands are code constants: scores at or above `SAFE_THRESHOLD` (0.9) execute; scores from `HOLD_FLOOR` (0.3) up to that threshold park a Hold; scores below the floor deny. Fail-closed: gate errors, timeouts, disabled gate, or missing key all deny without a Hold.
+Default decision path for unmatched commands: a decision model (set `SHUTTLE_GATE_MODEL`, for example `typesafe/jev-1.13` via OpenRouter's System One API) scores a single `is_safe` question about the command. Bands are code constants: scores at or above `SAFE_THRESHOLD` (0.9) execute; scores from `HOLD_FLOOR` (0.3) up to that threshold park a Hold; scores below the floor deny. Fail-closed: gate errors, timeouts, disabled gate, missing key, or unset model all deny without a Hold.
 _Avoid_: approval, judge service, moderator
 
 **Hold**:

@@ -27,31 +27,37 @@ from shuttle.mcp.tools import register_tools
 
 
 def _build_gate(config: ShuttleConfig) -> TypeSafeGate | None:
-    """Construct the LLM gate when enabled and keyed; None otherwise.
+    """Construct the LLM gate when enabled, keyed, and given a model.
 
     Construction-time twin of mcp.tools._gate_ready's call-time predicate
     — keep the two in sync. None means review-level commands deny with
     reason=disabled (fail closed).
     """
-    if config.gate_enabled and config.openrouter_api_key:
+    if not (config.gate_enabled and config.openrouter_api_key):
         logger.info(
-            "LLM gate enabled: model={m} via {url}",
-            m=config.gate_model,
-            url=config.gate_base_url,
+            "LLM gate disabled (gate_enabled={e}, api_key={k}) — "
+            "review-level commands will be denied",
+            e=config.gate_enabled,
+            k="set" if config.openrouter_api_key else "missing",
         )
-        return TypeSafeGate(
-            api_key=config.openrouter_api_key,
-            base_url=config.gate_base_url,
-            model=config.gate_model,
-            timeout=GATE_TIMEOUT,
+        return None
+    if not config.gate_model:
+        logger.error(
+            "LLM gate enabled but SHUTTLE_GATE_MODEL is unset — "
+            "review-level commands will be denied"
         )
+        return None
     logger.info(
-        "LLM gate disabled (gate_enabled={e}, api_key={k}) — "
-        "review-level commands will be denied",
-        e=config.gate_enabled,
-        k="set" if config.openrouter_api_key else "missing",
+        "LLM gate enabled: model={m} via {url}",
+        m=config.gate_model,
+        url=config.gate_base_url,
     )
-    return None
+    return TypeSafeGate(
+        api_key=config.openrouter_api_key,
+        base_url=config.gate_base_url,
+        model=config.gate_model,
+        timeout=GATE_TIMEOUT,
+    )
 
 
 async def create_mcp_server(

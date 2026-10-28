@@ -22,8 +22,8 @@ The agent sees exactly one of three shapes: command output (it ran), `Error: den
 
 When the disposition is `gate` (no block/allow match):
 
-1. If the gate is disabled (`SHUTTLE_GATE_ENABLED=false`, the default) or no API key is set, the command is denied (reason `disabled`). This makes local development behave identically, minus gate calls.
-1. Otherwise the gate asks a decision model (default `typesafe/jev-1.13` via OpenRouter's System One API) a single `is_safe` question about the command and node name. The model sees only that — no session history, secrets, or rule corpus.
+1. If the gate is disabled (`SHUTTLE_GATE_ENABLED=false`, the default), no API key is set, or `SHUTTLE_GATE_MODEL` is unset, the command is denied (reason `disabled`). This makes local development behave identically, minus gate calls.
+1. Otherwise the gate asks the model named by `SHUTTLE_GATE_MODEL` (for example `typesafe/jev-1.13` via OpenRouter's System One API) a single `is_safe` question about the command and node name. The model sees only that — no session history, secrets, or rule corpus.
 1. Bands are code constants. A calibrated probability ≥ `SAFE_THRESHOLD` (0.9) executes the command. A score from `HOLD_FLOOR` (0.3) up to the threshold parks a **Hold** and waits at most `HOLD_WAIT` (20 s). A score below the floor denies it (reason `unsafe`). Gate errors and timeouts deny too (reason `error`) — fail-open is impossible.
 
 The built-in ops policy is deliberately conservative. Read-only inspection (listing, reading, searching, checking status or logs) and connectivity checks are safe. Treated as unsafe: moving, renaming, deleting, or overwriting files outside a temp scratch directory; editing system or service configuration; changing ownership or permissions on system paths; installing, upgrading, or removing packages; stopping, disabling, or reconfiguring a running service; piping downloaded code to a shell; and powering off or rebooting the node. Restarting or reloading a service and cleaning temp files are usually safe; anything whose effect on a running service or persistent data is unclear is unsafe. Override the whole policy with `SHUTTLE_GATE_SAFE_INSTRUCTIONS`.
@@ -44,7 +44,7 @@ Operators configure the gate with environment variables:
 | -------------------------------- | --------------------------- | --------------------------------------------- |
 | `SHUTTLE_GATE_ENABLED`           | `false`                     | Turn gate calls on/off without touching rules |
 | `SHUTTLE_OPENROUTER_API_KEY`     | —                           | API key for the gate endpoint                 |
-| `SHUTTLE_GATE_MODEL`             | `typesafe/jev-1.13`         | Decision model (version-pinned)               |
+| `SHUTTLE_GATE_MODEL`             | —                           | Decision model (version-pinned); required to run the gate |
 | `SHUTTLE_GATE_BASE_URL`          | `https://openrouter.ai/api` | TypeSafe System One–compatible endpoint       |
 | `SHUTTLE_GATE_SAFE_INSTRUCTIONS` | built-in ops policy         | What the judge should treat as safe           |
 

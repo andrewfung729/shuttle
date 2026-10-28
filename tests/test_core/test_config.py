@@ -7,7 +7,7 @@ from shuttle.core.config import ShuttleConfig
 
 def test_default_config():
     """ShuttleConfig should provide sensible defaults without any env vars set."""
-    cfg = ShuttleConfig()
+    cfg = ShuttleConfig(_env_file=None)
 
     assert cfg.shuttle_dir == Path.home() / ".shuttle"
     assert cfg.db_url == "sqlite+aiosqlite:///~/.shuttle/shuttle.db"
@@ -33,7 +33,7 @@ def test_config_custom_values(monkeypatch, tmp_path):
     monkeypatch.setenv("SHUTTLE_POOL_MAX_LIFETIME", "7200")
     monkeypatch.setenv("SHUTTLE_POOL_QUEUE_SIZE", "20")
 
-    cfg = ShuttleConfig()
+    cfg = ShuttleConfig(_env_file=None)
 
     assert cfg.shuttle_dir == shuttle_dir
     assert cfg.db_url == "sqlite+aiosqlite:///custom.db"
@@ -47,11 +47,11 @@ def test_config_custom_values(monkeypatch, tmp_path):
 
 
 def test_gate_defaults():
-    """Gate config defaults: disabled, no key, pinned model, OpenRouter URL."""
-    cfg = ShuttleConfig()
+    """Gate config defaults: disabled, no key, no model, OpenRouter URL."""
+    cfg = ShuttleConfig(_env_file=None)
     assert cfg.gate_enabled is False
     assert cfg.openrouter_api_key is None
-    assert cfg.gate_model == "typesafe/jev-1.13"
+    assert cfg.gate_model is None
     assert cfg.gate_base_url == "https://openrouter.ai/api"
     assert cfg.gate_safe_instructions.strip() != ""
 
@@ -62,7 +62,7 @@ def test_gate_default_instructions_treat_mutations_as_unsafe():
     Guards the tightened default: a regression to a permissive policy would
     silently let context-dependent admin commands score confident-safe.
     """
-    policy = ShuttleConfig().gate_safe_instructions.lower()
+    policy = ShuttleConfig(_env_file=None).gate_safe_instructions.lower()
     for phrase in (
         "moving",
         "deleting",
@@ -81,7 +81,7 @@ def test_gate_env_overrides(monkeypatch):
     monkeypatch.setenv("SHUTTLE_GATE_BASE_URL", "https://api.typesafe.ai")
     monkeypatch.setenv("SHUTTLE_GATE_SAFE_INSTRUCTIONS", "custom instructions")
 
-    cfg = ShuttleConfig()
+    cfg = ShuttleConfig(_env_file=None)
     assert cfg.gate_enabled is True
     assert cfg.openrouter_api_key == "sk-or-123"
     assert cfg.gate_model == "jev-1.13.0"

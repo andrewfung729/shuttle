@@ -19,11 +19,11 @@ All fields in `ShuttleConfig` can be overridden with environment variables prefi
 | `SHUTTLE_POOL_QUEUE_SIZE`        | int    | `10`                                        | Size of the waiting queue when pool is full             |
 | `SHUTTLE_GATE_ENABLED`           | bool   | `false`                                     | Enable the LLM gate for unmatched (gated) commands           |
 | `SHUTTLE_OPENROUTER_API_KEY`     | string | —                                           | API key for the gate endpoint                           |
-| `SHUTTLE_GATE_MODEL`             | string | `typesafe/jev-1.13`                         | Decision model used by the gate (version-pinned)        |
+| `SHUTTLE_GATE_MODEL`             | string | —                                           | Decision model used by the gate; required when the gate is enabled |
 | `SHUTTLE_GATE_BASE_URL`          | string | `https://openrouter.ai/api`                 | TypeSafe System One–compatible endpoint                 |
 | `SHUTTLE_GATE_SAFE_INSTRUCTIONS` | string | built-in ops policy                         | Judge instructions for the gate's `is_safe` question    |
 
-With the gate disabled or the key missing, unmatched commands are denied (reason `disabled` in the command log) — local development behaves identically to a gated setup, minus gate calls. See [Security Rules](security-rules.md) for the gate model.
+With the gate disabled, the key missing, or `SHUTTLE_GATE_MODEL` unset, unmatched commands are denied (reason `disabled` in the command log) — local development behaves identically to a gated setup, minus gate calls. See [Security Rules](security-rules.md) for the gate model.
 
 ## Database URL Formats
 

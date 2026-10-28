@@ -48,5 +48,8 @@ class ShuttleConfig(BaseSettings):
         "usually safe. If the effect on a running service or on persistent "
         "data is unclear, treat the command as unsafe."
     )
-    gate_model: str = "typesafe/jev-1.13"
+    # No default model: set SHUTTLE_GATE_MODEL (for example
+    # "typesafe/jev-1.13"). When it is unset, an enabled gate stays off and
+    # review-level commands are denied (fail closed).
+    gate_model: str | None = None
     gate_base_url: str = "https://openrouter.ai/api"
