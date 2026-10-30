@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from unittest.mock import AsyncMock, MagicMock
 
@@ -122,12 +123,16 @@ def test_wrap_command_reports_the_commands_exit_status():
     assert _run_wrapped("definitely_not_a_command_xyz", "/tmp").returncode == 127
 
 
-def test_wrap_command_reports_failure_and_no_pwd_when_directory_missing():
-    """An unenterable working directory must not clobber the tracked cwd."""
-    cp = _run_wrapped("echo never-runs", "/definitely/missing/dir/xyz")
-    assert cp.returncode != 0
-    assert PWD_SENTINEL not in cp.stdout
-    assert cp.stdout == ""
+def test_wrap_command_falls_back_to_home_when_directory_missing():
+    """A vanished tracked cwd must not wedge the node: run from $HOME instead."""
+    cp = _run_wrapped("echo still-runs", "/definitely/missing/dir/xyz")
+    assert cp.returncode == 0
+    stdout, pwd = _parse_sentinel_output(cp.stdout)
+    assert stdout == "still-runs"
+    assert pwd == os.path.expanduser("~")
+    # The fallback is announced on stderr so the operator/log shows it happened.
+    assert "unreachable" in cp.stderr
+    assert "/definitely/missing/dir/xyz" in cp.stderr
 
 
 def test_wrap_command_emits_stdout_and_working_directory():
@@ -345,6 +350,74 @@ async def test_execute_keeps_working_directory_when_sentinel_has_no_pwd():
 
     await manager.execute(session.session_id, "cmd")
     assert session.working_directory == prev
+
+
+@pytest.mark.asyncio
+async def test_execute_invalidates_session_when_channel_reports_no_pwd():
+    """A channel that never reports a cwd must not be reused forever.
+
+    Regression test: a session whose working directory was deleted used to be
+    replayed for every later command, so the whole node returned empty output
+    until the service was restarted.
+    """
+    pool = make_mock_pool()
+    manager = SessionManager(pool=pool)
+    session = await manager.create("node-1")
+
+    _set_pool_result(
+        pool,
+        stdout="",
+        stderr="ash: cd: can't cd to /root/gone: No such file or directory\n",
+        exit_status=2,
+    )
+
+    result = await manager.execute(session.session_id, "echo hi")
+
+    assert result["exit_status"] == 2
+    assert session.status == SessionStatus.CLOSED
+    assert manager.list_active() == []
+    # The session is gone, so the next command forces a fresh session.
+    with pytest.raises(KeyError):
+        await manager.execute(session.session_id, "echo hi")
+
+
+@pytest.mark.asyncio
+async def test_execute_invalidates_session_on_channel_error():
+    """A dropped connection must not leave a half-dead session behind."""
+    pool = make_mock_pool()
+    manager = SessionManager(pool=pool)
+    session = await manager.create("node-1")
+
+    pooled_conn = MagicMock()
+    pooled_conn.conn = MagicMock()
+    pooled_conn.conn.run = AsyncMock(side_effect=OSError("Connection lost"))
+    pool.connection = MagicMock(
+        return_value=AsyncMock(
+            __aenter__=AsyncMock(return_value=pooled_conn),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
+
+    with pytest.raises(OSError):
+        await manager.execute(session.session_id, "echo hi")
+
+    assert session.status == SessionStatus.CLOSED
+    assert manager.list_active() == []
+
+
+@pytest.mark.asyncio
+async def test_execute_keeps_session_when_sentinel_reports_a_directory():
+    pool = make_mock_pool()
+    manager = SessionManager(pool=pool)
+    session = await manager.create("node-1")
+
+    _set_pool_result(pool, stdout=f"ok\n{PWD_SENTINEL}\n/srv\n")
+
+    await manager.execute(session.session_id, "echo ok")
+
+    assert session.status == SessionStatus.ACTIVE
+    assert [s.session_id for s in manager.list_active()] == [session.session_id]
+    assert session.working_directory == "/srv"
 
 
 @pytest.mark.asyncio

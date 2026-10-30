@@ -15,9 +15,14 @@ No execution path may bypass it.
 
   The output is split on the sentinel to extract the new working directory,
   and the channel exits with the command's own status (so a failing command
-  is not logged as success). If the working directory cannot be entered, the
-  command does not run, no directory is reported, and the channel exits with
-  the failed ``cd`` status.
+  is not logged as success). If the tracked working directory no longer
+  exists, the wrapper falls back to ``$HOME`` and reports it on stderr,
+  instead of failing every later command on that node.
+* A channel that ends without emitting the sentinel (deleted cwd, an
+  ``exit``/``exec`` in the command, a dropped connection) closes the
+  session: the next command on that node creates a fresh one, whose working
+  directory is re-read with ``pwd``. A wedged session is therefore never
+  reused forever.
 * Output is truncated to ``MAX_OUTPUT_BYTES`` (10 MB) before being returned.
 """
 
@@ -28,6 +33,8 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+from loguru import logger
 
 # Maximum output size returned to the caller (10 MB).
 MAX_OUTPUT_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -127,6 +134,24 @@ class SessionManager:
             session.status = SessionStatus.CLOSED
             del self._sessions[session_id]
 
+    def _invalidate(self, session: SSHSession, reason: str) -> None:
+        """Close a session whose remote state can no longer be trusted.
+
+        Used when the remote channel ends without reporting a working
+        directory. The session is dropped from the registry so the next
+        command on that node creates a fresh one (and thus re-reads ``pwd``)
+        rather than replaying the same failure forever.
+        """
+        was_active = self._sessions.pop(session.session_id, None) is not None
+        session.status = SessionStatus.CLOSED
+        if was_active:
+            logger.warning(
+                "Invalidated session {sid} on node {node}: {reason}",
+                sid=session.session_id,
+                node=session.node_id,
+                reason=reason,
+            )
+
     def get(self, session_id: str) -> SSHSession | None:
         """Return the active session for *session_id*, or ``None``."""
         return self._sessions.get(session_id)
@@ -179,7 +204,15 @@ class SessionManager:
             raise KeyError(f"Session '{session_id}' not found or already closed.")
 
         wrapped = _wrap_command(command, session.working_directory)
-        run_result = await self._run_on_node(session.node_id, wrapped, timeout=timeout)
+        try:
+            run_result = await self._run_on_node(
+                session.node_id, wrapped, timeout=timeout
+            )
+        except Exception as exc:
+            # Connection dropped, channel killed, timeout: the session's remote
+            # state is unknown, so drop it and let the next call start fresh.
+            self._invalidate(session, f"channel error: {exc}")
+            raise
 
         raw_stdout = run_result["stdout"]
         stderr = run_result["stderr"]
@@ -193,6 +226,12 @@ class SessionManager:
 
         if new_pwd:
             session.working_directory = new_pwd
+        elif PWD_SENTINEL not in raw_stdout:
+            # The channel died before the trailing ``pwd``: the tracked
+            # directory is unreachable on an older wrapper, the command exited
+            # the shell, or the connection dropped. Reusing this session would
+            # make every later command on the node fail the same way.
+            self._invalidate(session, "no working-directory sentinel in output")
 
         return {
             "stdout": stdout,
@@ -235,20 +274,29 @@ def _wrap_command(command: str, working_directory: str) -> str:
     The command's exit status is captured immediately after it runs and the
     channel is terminated with ``exit $ec``. Without this the trailing probe
     would decide the channel's exit status (always success), masking a failing
-    command. If the working directory cannot be entered, the command does not
-    run, no sentinel is emitted, and the channel exits with the failed ``cd``
-    status, leaving the session's tracked directory unchanged.
+    command.
+
+    If the tracked directory cannot be entered (it was deleted, unmounted, or
+    made unreadable) the wrapper falls back to ``$HOME`` and says so on
+    stderr, so the command still runs and the sentinel reports a directory the
+    session can keep using. Failing the whole node because one directory
+    disappeared is never the intent.
 
     Returns
     -------
     str
         A shell string of the form::
 
-            cd <quoted_dir> || exit $?; <command>; ec=$?; echo ---SHUTTLE_PWD---; pwd; exit $ec
+            cd <quoted_dir> 2>/dev/null || { printf '%s\n' <notice> >&2; cd ~ || exit $?; };
+            <command>; ec=$?; echo ---SHUTTLE_PWD---; pwd; exit $ec
     """
     quoted_dir = shlex.quote(working_directory)
+    notice = shlex.quote(
+        f"[shuttle] working directory {working_directory} is unreachable; using $HOME"
+    )
     return (
-        f"cd {quoted_dir} || exit $?; {command}; ec=$?; "
+        f"cd {quoted_dir} 2>/dev/null || {{ printf '%s\n' {notice} >&2; "
+        f"cd ~ || exit $?; }}; {command}; ec=$?; "
         f"echo {PWD_SENTINEL}; pwd; exit $ec"
     )
 
